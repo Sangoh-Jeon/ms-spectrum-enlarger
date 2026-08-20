@@ -590,7 +590,7 @@ def process_excel_with_selections(excel_path, sheet_selections, font_size=48, st
     wb.save(output_path)
     return output_path
 
-class MRMSelectionModal(tk.Toplevel):
+class MRMSelectionModal(tk.Toplevel if tk is not None else object):
     """
     Modal Dialog popup showing extracted m/z peak values per Sheet and Graph Type (Precursor vs Product Ion).
     Features:
