@@ -1,11 +1,11 @@
 streamlit>=1.30.0
-openpyxl>=3.1.2
+# NOTE: openpyxl의 ws._images 비공개(private) API를 사용 중입니다.
+# 업그레이드 전 반드시 동작 확인이 필요합니다.
+openpyxl==3.1.2
 pillow>=10.0.0
 opencv-python-headless>=4.8.0.76
 numpy>=1.24.0
 pandas>=2.0.0
 google-generativeai>=0.8.0
 google-cloud-vision>=3.5.0
-fastapi>=0.100.0
-uvicorn>=0.22.0
-python-multipart>=0.0.6
+# fastapi, uvicorn, python-multipart 는 현재 사용하지 않아 제거됨
