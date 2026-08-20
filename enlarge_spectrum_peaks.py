@@ -289,13 +289,17 @@ def _get_gemini_raw_peaks(img_bytes, is_precursor=True):
     if is_precursor:
         prompt = f"""
 Examine this LC-MS/MS Precursor Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
-This is a Q1 Precursor Scan.
-1. Identify the single main compound Precursor Ion peak (the tallest, most dominant peak on the entire spectrum, e.g. 336.06, 295.04).
-2. Extract all other numerical peak m/z labels printed near peak tops. Do not extract axis numbers.
-3. Mark ONLY the single tallest main precursor peak with "is_recommended": true. Mark all others with "is_recommended": false.
+1. Look at the horizontal X-axis tick numbers at the bottom to determine the mass range:
+   - "x_axis_min": numerical m/z at the left edge (usually 0 or 50)
+   - "x_axis_max": numerical m/z at the right edge (e.g. 200, 350, 500)
+2. Identify the single main compound Precursor Ion peak (the tallest, most dominant peak on the entire spectrum, e.g. 336.06 or 168.96).
+3. Extract all other numerical peak m/z labels printed near peak tops. Do not extract axis tick numbers as peaks.
+4. Mark ONLY the single tallest main precursor peak with "is_recommended": true. Mark all others with "is_recommended": false.
 
 Return ONLY a JSON object:
 {{
+  "x_axis_min": 0,
+  "x_axis_max": 500,
   "peaks": [
     {{"mz": 336.06, "is_recommended": true, "height_rank": 1, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}}
   ]
@@ -304,16 +308,21 @@ Return ONLY a JSON object:
     else:
         prompt = f"""
 Examine this LC-MS/MS Product (Fragment) Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
-1. Identify all numerical fragment peak m/z labels printed near peak tops (e.g. 283.07, 183.07, 76.99, etc.). Do not extract axis numbers.
-2. Evaluate their spectral peak heights (sensitivities) from tallest (rank 1) to shortest.
-3. Exclude the unfragmented parent precursor ion (the largest m/z peak).
-4. Mark the TOP 3 tallest fragment ion peaks with "is_recommended": true. Mark all other peaks with "is_recommended": false.
+1. Look at the horizontal X-axis tick numbers at the bottom to determine the mass range:
+   - "x_axis_min": numerical m/z at the left edge (usually 0 or 30 or 50)
+   - "x_axis_max": numerical m/z at the right edge (e.g. 200, 350, 500)
+2. Identify all numerical fragment peak m/z labels printed near peak tops (e.g. 283.07, 183.07, 76.99, etc.). Do not extract axis numbers.
+3. Evaluate their spectral peak heights (sensitivities) from tallest (rank 1) to shortest.
+4. Exclude the unfragmented parent precursor ion (the largest m/z peak).
+5. Mark the TOP 3 tallest fragment ion peaks with "is_recommended": true. Mark all other peaks with "is_recommended": false.
 
 Return ONLY a JSON object:
 {{
+  "x_axis_min": 0,
+  "x_axis_max": 350,
   "peaks": [
     {{"mz": 283.07, "is_recommended": true, "height_rank": 1, "ymin": 150, "xmin": 1200, "xmax": 1300, "ymax": 180}},
-    {{"mz": 128.05, "is_recommended": true, "height_rank": 2, "ymin": 580, "xmin": 450, "xmax": 550, "ymax": 610}},
+    {{"mz": 183.07, "is_recommended": true, "height_rank": 2, "ymin": 580, "xmin": 450, "xmax": 550, "ymax": 610}},
     {{"mz": 76.99, "is_recommended": true, "height_rank": 3, "ymin": 1000, "xmin": 200, "xmax": 300, "ymax": 1030}},
     {{"mz": 51.01, "is_recommended": false, "height_rank": 4, "ymin": 1100, "xmin": 100, "xmax": 180, "ymax": 1130}}
   ]
@@ -383,6 +392,8 @@ Return ONLY a JSON object:
                             'val_num': val_num,
                             'is_recommended': bool(p.get('is_recommended', False)),
                             'height_rank': int(p.get('height_rank', 999)),
+                            'x_axis_min': float(data.get('x_axis_min', 0.0)),
+                            'x_axis_max': float(data.get('x_axis_max', 500.0)),
                             'y_min': ymin,
                             'x_min': xmin,
                             'x_max': xmax,
@@ -494,7 +505,7 @@ def get_render_font(font_size, bold=True):
     except TypeError:
         return ImageFont.load_default()
 
-def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
+def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_precursor=True):
     """
     Renders enlarged peak labels with user editable overrides:
     peak_overrides = [ {'orig_mz': '336.06', 'final_mz': '335.06', 'is_mrm': True}, ... ]
@@ -536,17 +547,28 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
             
     if all_vals:
         min_v, max_v = min(all_vals), max(all_vals)
-        mz_min = 50.0 if min_v >= 45.0 else 0.0
-        if max_v <= 220.0:
-            mz_max = 200.0
-        elif max_v <= 520.0:
-            mz_max = 500.0
-        elif max_v <= 1020.0:
-            mz_max = 1000.0
-        else:
-            mz_max = float(int(np.ceil(max_v / 100.0) * 100.0))
+        if is_precursor:
+            if max_v <= 210.0:
+                mz_min, mz_max = 0.0, 200.0
+            elif max_v <= 520.0:
+                mz_min, mz_max = 50.0, 500.0
+            elif max_v <= 1020.0:
+                mz_min, mz_max = 50.0, 1000.0
+            else:
+                mz_min, mz_max = 0.0, float(int(np.ceil(max_v / 100.0) * 100.0))
+        else: # Product scan
+            if max_v <= 210.0:
+                mz_min, mz_max = 0.0, 200.0
+            elif max_v <= 360.0:
+                mz_min, mz_max = 0.0, 350.0
+            elif max_v <= 520.0:
+                mz_min, mz_max = 0.0, 500.0
+            elif max_v <= 1020.0:
+                mz_min, mz_max = 0.0, 1000.0
+            else:
+                mz_min, mz_max = 0.0, float(int(np.ceil(max_v / 100.0) * 100.0))
     else:
-        mz_min, mz_max = 50.0, 500.0
+        mz_min, mz_max = (50.0, 500.0) if is_precursor else (0.0, 350.0)
         
     peak_labels = []
     if peak_overrides:
@@ -563,8 +585,8 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
             x_calc = max(x_start + 15, min(x_end - 15, x_calc))
             
             # Scan true peak apex from baseline upwards (ignoring y < 80 top grid)
-            x1 = max(x_start, x_calc - 45)
-            x2 = min(x_end, x_calc + 45)
+            x1 = max(x_start, x_calc - 30)
+            x2 = min(x_end, x_calc + 30)
             best_apex_x = x_calc
             best_apex_y = y_bottom
             
@@ -667,7 +689,7 @@ def process_excel_with_selections(excel_path, sheet_selections, font_size=45, st
             overrides = sel_dict['precursor'] if is_precursor else sel_dict['product']
             
             img_bytes = img._data()
-            proc_bytes = process_spectrum_image(img_bytes, peak_overrides=overrides, font_size=font_size)
+            proc_bytes = process_spectrum_image(img_bytes, peak_overrides=overrides, font_size=font_size, is_precursor=is_precursor)
             
             temp_path = os.path.join(temp_dir, f"{sheet_name}_{idx+1}.png")
             with open(temp_path, "wb") as f:
