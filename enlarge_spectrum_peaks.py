@@ -72,13 +72,12 @@ def detect_axis_lines(img):
     return x_axis, y_axis
 
 
-def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, padding_x=8, padding_y=8):
+def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, img_w=2225, padding_x=8, padding_y=8):
     """
-    2D 계단식(Cascading) 텍스트 겹침 방지 알고리즘.
-    - X축 오름차순(좌측 -> 우측)으로 순차 검사
-    - 이미 배치된 좌측의 모든 레이블들과 2D 바운딩 박스 충돌 검사
-    - 충돌 시 겹친 레이블보다 한 단계 더 위로(Y 감소) 계단식 상승
-    - 피크에서 위로 이동한 레이블은 원래 피크 꼭대기까지 지시선(Leader line) 자동 연결
+    2D 계단식(Cascading) 텍스트 겹침 방지 및 상단 고피크 사이드 정렬 알고리즘.
+    - apex_y < 80 (상단 여백 부족): 피크 꼭지점의 수평 옆(우측/좌측)으로 배치
+    - 수평 지시선(Side Leader Line): 텍스트 중앙에서 피크 꼭지점으로 좌/우 연결
+    - 일반 피크: 피크 상단 배치 후 좌->우 2D 바운딩 박스 계단식 겹침 해소
     """
     labels.sort(key=lambda item: item['center'][0])
     placed = []
@@ -96,12 +95,30 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, paddin
         item['apex_x'] = cx
         item['apex_y'] = cy
 
-        init_x = cx - tw // 2
-        init_y = max(10, cy - th - 6)
+        # ── 1. 상단 여백 부족 시 사이드(Side) 배치 ────────────────────────────
+        if cy < 80:
+            item['is_side_aligned'] = True
+            # 우측 여백이 충분하면 우측 배치, 부족하면 좌측 배치
+            if cx + tw + 20 < img_w - 35:
+                curr_x = cx + 12
+                item['side_dir'] = 'right'
+            else:
+                curr_x = max(10, cx - tw - 12)
+                item['side_dir'] = 'left'
 
-        curr_x = init_x
-        curr_y = init_y
+            # 피크 꼭지점과 텍스트 수직 중심을 완벽히 일치
+            curr_y = max(10, cy - th // 2)
+            init_x = curr_x
+            init_y = curr_y
+        else:
+            item['is_side_aligned'] = False
+            item['side_dir'] = None
+            init_x = cx - tw // 2
+            init_y = max(10, cy - th - 6)
+            curr_x = init_x
+            curr_y = init_y
 
+        # ── 2. 기존 배치된 레이블들과 2D 겹침 검사 및 계단식 회피 ────────────
         max_attempts = 15
         attempt = 0
         while attempt < max_attempts:
@@ -121,7 +138,12 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, paddin
                 overlap_y = not (b_y2 <= p_y1 or b_y1 >= p_y2)
 
                 if overlap_x and overlap_y:
-                    curr_y = p_y1 - th - padding_y
+                    if item.get('is_side_aligned', False):
+                        # 사이드 정렬 상태에서 겹치면 아래로 살짝 내림
+                        curr_y = p_y2 + padding_y
+                    else:
+                        # 일반 정렬 상태에서 겹치면 위로 계단식 상승
+                        curr_y = p_y1 - th - padding_y
                     collision_found = True
                     break
 
@@ -131,11 +153,14 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, paddin
 
         if curr_y < 10:
             curr_y = 10
-            curr_x = cx + 8
+            if not item.get('is_side_aligned', False):
+                curr_x = cx + 12
+                item['is_side_aligned'] = True
+                item['side_dir'] = 'right'
 
         item['curr_x'] = curr_x
         item['curr_y'] = curr_y
-        item['is_shifted'] = (abs(curr_y - init_y) > 10 or abs(curr_x - init_x) > 10)
+        item['is_shifted'] = (abs(curr_y - init_y) > 8 or abs(curr_x - init_x) > 8 or item.get('is_side_aligned', False))
 
         placed.append(item)
 
@@ -203,7 +228,6 @@ def _get_gemini_raw_peaks_and_range(img_bytes, is_precursor=True):
     Gemini AI에게 오직 두 가지만 정확히 요청합니다:
     1. 상단 제목의 스캔 범위 텍스트(예: '(166 - 172)' -> min_mz=166.0, max_mz=172.0)
     2. 스펙트럼 피크들의 순수 분자량(m/z) 숫자 목록
-    (AI의 불확실한 픽셀 좌표는 일절 요청하지 않음)
     """
     global _last_ai_error
     _last_ai_error = None
@@ -319,7 +343,6 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     max_mz = result['max_mz']
 
     if raw_peaks:
-        # 중복 병합 및 정렬 (delta <= 0.8)
         sorted_raw = sorted(raw_peaks, key=lambda p: (not p.get('is_recommended', False), p.get('height_rank', 999)))
         cleaned = []
         for p in sorted_raw:
@@ -382,7 +405,8 @@ def get_render_font(font_size, bold=True):
 def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_precursor=True, min_mz=None, max_mz=None):
     """
     순수 기하학적 1:1 선형 비례 공식과 로컬 피크 정점 탐색을 통해
-    100% 정밀한 위치에 45pt/40pt 레이블을 배치하고 2D 계단식 겹침을 방지합니다.
+    100% 정밀한 위치에 45pt/35pt 레이블을 배치하고,
+    상단 고피크 수평 사이드 지시선 및 2D 계단식 겹침 방지를 적용합니다.
     """
     if peak_overrides is None:
         peak_overrides = []
@@ -424,7 +448,6 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
         max_v = max(all_vals, default=350.0)
         min_v = min(all_vals, default=20.0)
 
-        # Precursor 좁은 줌 케이스 (span < 15 Da)
         if is_precursor and (max_v - min_v < 15.0):
             center_v = (max_v + min_v) / 2.0
             min_mz = round(center_v - 3.0)
@@ -462,8 +485,6 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
         x_calc = calc_x(val_f)
         x_calc = max(x_start + 5, min(x_end - 5, x_calc))
 
-        # 로컬 피크 정점 탐색:
-        # 반경을 ±20px 내외로 제한하여 해당 피크의 꼭대기만 탐색
         scan = max(15, min(30, int(px_per_da * 0.3)))
         x1 = max(x_start, x_calc - scan)
         x2 = min(x_end, x_calc + scan)
@@ -493,11 +514,11 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     draw = ImageDraw.Draw(overlay)
 
     font_main = get_render_font(font_size, bold=True)
-    font_sub  = get_render_font(35, bold=False)  # 기타 이온: 회색 35pt 고정
+    font_sub  = get_render_font(35, bold=False)  # 기타 이온: 회색 35pt
 
-    # 2D 계단식 겹침 방지 알고리즘 실행
+    # 2D 계단식 겹침 방지 및 상단 고피크 사이드 정렬 실행
     labels = resolve_label_collisions_cascading(
-        peak_labels, font_main, font_sub, draw, padding_x=8, padding_y=8
+        peak_labels, font_main, font_sub, draw, img_w=w, padding_x=8, padding_y=8
     )
 
     for item in labels:
@@ -506,20 +527,34 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
         tw, th = item['tw'], item['th']
         apex_x, apex_y = item['apex_x'], item['apex_y']
         is_mrm = item.get('is_mrm', False)
+        is_side = item.get('is_side_aligned', False)
+        side_dir = item.get('side_dir')
         is_shifted = item.get('is_shifted', False)
 
         text_color = (0, 0, 220, 255) if is_mrm else (120, 120, 120, 255)
         line_color = (0, 0, 220, 255) if is_mrm else (150, 150, 150, 255)
         font = font_main if is_mrm else font_sub
 
-        if is_shifted:
+        if is_side:
+            # ── 상단 고피크: 수평 방향 지시선 (좌/우 수평 연결) ────────────────
+            if side_dir == 'right':
+                # 텍스트 좌측 중앙 -> 피크 꼭지점 우측
+                draw.line([(tx - 4, ty + th // 2), (apex_x + 3, apex_y)], fill=line_color, width=2)
+            else:
+                # 텍스트 우측 중앙 -> 피크 꼭지점 좌측
+                draw.line([(tx + tw + 4, ty + th // 2), (apex_x - 3, apex_y)], fill=line_color, width=2)
+            draw.ellipse([apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3], fill=line_color)
+        elif is_shifted:
+            # ── 일반 계단식 상승: 텍스트 하단 중앙 -> 피크 꼭지점 ─────────────
             text_bottom_cx = tx + tw // 2
             text_bottom_cy = ty + th + 2
             draw.line([(text_bottom_cx, text_bottom_cy), (apex_x, apex_y)], fill=line_color, width=2)
             draw.ellipse([apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3], fill=line_color)
         else:
+            # 피크 꼭대기에 바로 배치된 경우 작은 정점 점 표시
             draw.ellipse([apex_x - 2, apex_y - 2, apex_x + 2, apex_y + 2], fill=line_color)
 
+        # 텍스트 외곽에 부드러운 흰색 스트로크를 주어 배경 선과 겹쳐도 또렷하게 표시
         draw.text((tx, ty), txt, font=font, fill=text_color, stroke_width=2, stroke_fill=(255, 255, 255, 200))
 
     final_pil = Image.alpha_composite(pil_base, overlay).convert('RGB')
