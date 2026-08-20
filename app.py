@@ -72,6 +72,33 @@ st.markdown("""
     .sub-header { font-size: 14px; color: #555555; margin-bottom: 20px; }
     .stButton>button { background-color: #003399; color: white; font-weight: bold; border-radius: 8px; height: 3em; }
     .stDownloadButton>button { background-color: #28a745; color: white; font-weight: bold; border-radius: 8px; height: 3em; }
+    
+    /* 대형 드래그 앤 드롭 영역 스타일링 */
+    [data-testid="stFileUploaderDropzone"] {
+        min-height: 200px !important;
+        padding: 35px 20px !important;
+        border: 2.5px dashed #003399 !important;
+        border-radius: 16px !important;
+        background-color: #f8faff !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        transition: all 0.25s ease-in-out !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        background-color: #eaf1fb !important;
+        border-color: #002266 !important;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(0, 51, 153, 0.12) !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] {
+        font-size: 16px !important;
+        font-weight: 500 !important;
+        color: #333333 !important;
+        margin-top: 8px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
