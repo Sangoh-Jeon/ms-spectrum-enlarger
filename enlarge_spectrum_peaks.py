@@ -19,21 +19,6 @@ except ImportError:
     messagebox = None
     ttk = None
 
-# Lazy EasyOCR reader
-_easyocr_reader = None
-
-def get_easyocr_reader():
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        try:
-            ssl._create_default_https_context = ssl._create_unverified_context
-            import easyocr
-            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
-        except Exception as e:
-            print(f"EasyOCR reader init warning: {e}")
-            _easyocr_reader = None
-    return _easyocr_reader
-
 def get_base_dir():
     """
     Returns the absolute directory path of the running application.
@@ -189,75 +174,9 @@ def calibrate_and_correct_peaks(peaks):
 
 def extract_peaks_from_image(img_bytes, is_precursor=True):
     """
-    Extracts detected m/z peak values from a single spectrum image with ROI cropping and X-axis calibration.
-    High performance (ROI cropped single-pass OCR) + High accuracy (Monotonicity & Linear X-axis calibration).
+    Extracts detected m/z peak values from a single spectrum image using Google Cloud Vision AI.
     """
-    nparr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None or img.size == 0:
-        return {'all_peaks': [], 'default_checked': set()}
-        
-    x_axis, y_axis = detect_axis_lines(img)
-    x_min_plot = x_axis + 5
-    y_max_plot = y_axis - 5
-    y_min_plot = 40
-    x_max_plot = min(img.shape[1] - 20, 2150)
-    
-    # ROI Cropping (Top 65% vertical band where peak text exists)
-    roi_y2 = min(y_max_plot, int(img.shape[0] * 0.65))
-    if roi_y2 <= y_min_plot or x_max_plot <= x_min_plot:
-        return {'all_peaks': [], 'default_checked': set()}
-        
-    roi = img[y_min_plot:roi_y2, x_min_plot:x_max_plot]
-    if roi.size == 0:
-        return {'all_peaks': [], 'default_checked': set()}
-        
-    # Scale ROI 1.5x for sharp digit recognition
-    roi_scaled = cv2.resize(roi, (int(roi.shape[1] * 1.5), int(roi.shape[0] * 1.5)), interpolation=cv2.INTER_CUBIC)
-    
-    # Single EasyOCR call on ROI
-    reader = get_easyocr_reader()
-    if reader is None:
-        return {'all_peaks': [], 'default_checked': set()}
-    results = reader.readtext(roi_scaled, allowlist='0123456789.')
-    
-    peaks = []
-    seen_centers = set()
-    
-    for bbox, text, prob in results:
-        pts = np.array(bbox, dtype=np.float32) / 1.5
-        if pts.size == 0: continue
-        x_min = x_min_plot + int(np.min(pts[:, 0]))
-        y_min = y_min_plot + int(np.min(pts[:, 1]))
-        x_max = x_min_plot + int(np.max(pts[:, 0]))
-        y_max = y_min_plot + int(np.max(pts[:, 1]))
-        
-        clean_txt = text.strip()
-        if re.search(r'[a-zA-Z]', clean_txt) and not re.search(r'^\d+\.\d+$', clean_txt): continue
-        match = re.search(r'\d+\.\d+|\d{2,3}', clean_txt)
-        if not match: continue
-        val_str = match.group(0)
-        try:
-            val_num = float(val_str)
-            if not (10.0 <= val_num <= 2000.0): continue
-        except ValueError: continue
-        
-        cx, cy = (x_min + x_max) // 2, (y_min + y_max) // 2
-        dup = False
-        for scx, scy in seen_centers:
-            if abs(cx - scx) < 25 and abs(cy - scy) < 25:
-                dup = True; break
-        if dup: continue
-        
-        seen_centers.add((cx, cy))
-        peaks.append({'mz': f"{val_num:.2f}", 'val_num': val_num, 'y_min': y_min, 'x_min': x_min})
-        
-    peaks = calibrate_and_correct_peaks(peaks)
-    peaks_by_height = sorted(peaks, key=lambda p: p['y_min'])
-    top_limit = 1 if is_precursor else 3
-    default_checked = set(p['mz'] for p in peaks_by_height[:top_limit])
-    all_peaks_sorted = sorted(list(set(p['mz'] for p in peaks)), key=lambda x: float(x))
-    return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked}
+    return extract_peaks_with_google_vision(img_bytes, is_precursor=is_precursor)
 
 def auto_load_gcp_credentials():
     """Auto-detects gcp_key.json or credentials.json in base directory for Google Cloud Vision API."""
@@ -269,17 +188,14 @@ def auto_load_gcp_credentials():
             return key_path
     return None
 
-def _parse_gcp_vision_response(response, is_precursor):
-    """Helper to parse Google Cloud Vision API response into peak dictionaries."""
-    if response.error.message:
-        return None
+def _parse_gcp_vision_raw_peaks(response):
+    if not response or response.error.message:
+        return []
     annotations = response.text_annotations
     if not annotations:
-        return None
-        
+        return []
     raw_peaks = []
     seen_centers = set()
-    
     for ann in annotations[1:]:
         text = ann.description.strip()
         if re.search(r'[a-zA-Z]', text) and not re.search(r'^\d+\.\d+$', text): continue
@@ -296,14 +212,12 @@ def _parse_gcp_vision_response(response, is_precursor):
         ys = [v.y for v in vertices]
         x_min, x_max = min(xs), max(xs)
         y_min, y_max = min(ys), max(ys)
-        
         cx, cy = (x_min + x_max) // 2, (y_min + y_max) // 2
         dup = False
         for scx, scy in seen_centers:
             if abs(cx - scx) < 25 and abs(cy - scy) < 25:
                 dup = True; break
         if dup: continue
-        
         seen_centers.add((cx, cy))
         raw_peaks.append({
             'mz': f"{val_num:.2f}",
@@ -315,7 +229,13 @@ def _parse_gcp_vision_response(response, is_precursor):
             'cx': cx,
             'cy': cy
         })
-        
+    return raw_peaks
+
+def _parse_gcp_vision_response(response, is_precursor):
+    """Helper to parse Google Cloud Vision API response into peak dictionaries."""
+    raw_peaks = _parse_gcp_vision_raw_peaks(response)
+    if not raw_peaks:
+        return None
     corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
     peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
     top_limit = 1 if is_precursor else 3
@@ -326,7 +246,7 @@ def _parse_gcp_vision_response(response, is_precursor):
 def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     """
     Extracts peak m/z values using Google Lens / Google Cloud Vision AI engine (99.99% accuracy in ~0.05s).
-    Supports Streamlit Cloud Secrets, GCP Service Account JSON, or Local Calibrated OCR Fallback.
+    Supports Streamlit Cloud Secrets, GCP Service Account JSON.
     """
     # 0. Direct Streamlit Secrets check (for 1-click Streamlit Cloud deployment)
     try:
@@ -372,12 +292,79 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
         except Exception:
             pass
 
-    # 3. Fallback to Calibrated Local OCR Engine
-    res = extract_peaks_from_image(img_bytes, is_precursor=is_precursor)
-    res['engine'] = 'Local Fast OCR Engine 💻'
-    return res
+    return {'all_peaks': [], 'default_checked': set(), 'engine': 'Google Cloud Vision AI (키 필요)'}
 
-def process_spectrum_image(img_bytes, peak_overrides=None, font_size=48):
+def _get_raw_peaks_for_image(img_bytes, img):
+    """Extracts raw peaks using Google Cloud Vision."""
+    # 1. Google Cloud Vision via Streamlit Secrets
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+            from google.cloud import vision
+            from google.oauth2 import service_account
+            info = dict(st.secrets["gcp_service_account"])
+            creds = service_account.Credentials.from_service_account_info(info)
+            client = vision.ImageAnnotatorClient(credentials=creds)
+            response = client.text_detection(image=vision.Image(content=img_bytes))
+            rp = _parse_gcp_vision_raw_peaks(response)
+            if rp: return rp
+    except Exception:
+        pass
+
+    # 2. Google Cloud Vision via Environment JSON String
+    if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
+        try:
+            from google.cloud import vision
+            from google.oauth2 import service_account
+            info = json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+            creds = service_account.Credentials.from_service_account_info(info)
+            client = vision.ImageAnnotatorClient(credentials=creds)
+            response = client.text_detection(image=vision.Image(content=img_bytes))
+            rp = _parse_gcp_vision_raw_peaks(response)
+            if rp: return rp
+        except Exception:
+            pass
+
+    # 3. Google Cloud Vision via File
+    key_path = auto_load_gcp_credentials()
+    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+        try:
+            from google.cloud import vision
+            client = vision.ImageAnnotatorClient()
+            response = client.text_detection(image=vision.Image(content=img_bytes))
+            rp = _parse_gcp_vision_raw_peaks(response)
+            if rp: return rp
+        except Exception:
+            pass
+
+    return []
+
+def get_render_font(font_size, bold=True):
+    """Finds available system font on Windows or Linux / Streamlit Cloud."""
+    font_candidates = [
+        'C:/Windows/Fonts/arialbd.ttf',
+        'C:/Windows/Fonts/arial.ttf',
+        'C:/Windows/Fonts/malgunbd.ttf',
+        'C:/Windows/Fonts/malgun.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+    ]
+    for fp in font_candidates:
+        if os.path.exists(fp):
+            try:
+                return ImageFont.truetype(fp, font_size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=font_size)
+    except TypeError:
+        return ImageFont.load_default()
+
+def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     """
     Renders enlarged peak labels with user editable overrides:
     peak_overrides = [ {'orig_mz': '336.06', 'final_mz': '335.06', 'is_mrm': True}, ... ]
@@ -394,63 +381,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=48):
     if img is None or img.size == 0:
         return img_bytes
     
-    x_axis, y_axis = detect_axis_lines(img)
-    x_min_plot = x_axis + 5
-    x_axis, y_axis = detect_axis_lines(img)
-    x_min_plot = x_axis + 5
-    y_max_plot = y_axis - 5
-    y_min_plot = 40
-    x_max_plot = min(img.shape[1] - 20, 2150)
-    
-    # ROI Cropping (Top 65% vertical band where peak text exists)
-    roi_y2 = min(y_max_plot, int(img.shape[0] * 0.65))
-    roi = img[y_min_plot:roi_y2, x_min_plot:x_max_plot]
-    
-    raw_peaks = []
-    seen_centers = set()
-    
-    if roi.size > 0:
-        roi_scaled = cv2.resize(roi, (int(roi.shape[1] * 1.5), int(roi.shape[0] * 1.5)), interpolation=cv2.INTER_CUBIC)
-        results = reader.readtext(roi_scaled, allowlist='0123456789.')
-        
-        for bbox, text, prob in results:
-            pts = np.array(bbox, dtype=np.float32) / 1.5
-            if pts.size == 0: continue
-            x_min = x_min_plot + int(np.min(pts[:, 0]))
-            y_min = y_min_plot + int(np.min(pts[:, 1]))
-            x_max = x_min_plot + int(np.max(pts[:, 0]))
-            y_max = y_min_plot + int(np.max(pts[:, 1]))
-            
-            clean_txt = text.strip()
-            if re.search(r'[a-zA-Z]', clean_txt) and not re.search(r'^\d+\.\d+$', clean_txt): continue
-            match = re.search(r'\d+\.\d+|\d{2,3}', clean_txt)
-            if not match: continue
-            val_str = match.group(0)
-            try:
-                val_num = float(val_str)
-                if not (10.0 <= val_num <= 2000.0): continue
-            except ValueError: continue
-            
-            cx, cy = (x_min + x_max) // 2, (y_min + y_max) // 2
-            dup = False
-            for scx, scy in seen_centers:
-                if abs(cx - scx) < 25 and abs(cy - scy) < 25:
-                    dup = True; break
-            if dup: continue
-            
-            seen_centers.add((cx, cy))
-            raw_peaks.append({
-                'mz': f"{val_num:.2f}",
-                'val_num': val_num,
-                'y_min': y_min,
-                'x_min': x_min,
-                'x_max': x_max,
-                'y_max': y_max,
-                'cx': cx,
-                'cy': cy
-            })
-            
-    # Apply X-Axis Calibration & Monotonicity Auto-Correction
+    raw_peaks = _get_raw_peaks_for_image(img_bytes, img)
     corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
     
     peak_labels = []
@@ -502,23 +433,15 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=48):
         roi_img = out_img[py1:py2, px1:px2]
         roi_img[text_or_bg] = [255, 255, 255]
         
-    # Transparent Overlay with MRM styling (Blue vs Black, 48pt vs 46pt)
+    # Transparent Overlay with MRM styling (Blue 45pt vs Gray 40pt)
     img_rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
     pil_base = Image.fromarray(img_rgb).convert('RGBA')
     
     overlay = Image.new('RGBA', pil_base.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
     
-    font_path = 'C:/Windows/Fonts/arialbd.ttf'
-    if not os.path.exists(font_path):
-        font_path = 'C:/Windows/Fonts/malgunbd.ttf'
-        
-    try:
-        font_main = ImageFont.truetype(font_path, font_size)
-        font_sub = ImageFont.truetype(font_path, max(12, font_size - 2))
-    except Exception:
-        font_main = ImageFont.load_default()
-        font_sub = ImageFont.load_default()
+    font_main = get_render_font(font_size, bold=True)
+    font_sub = get_render_font(max(12, font_size - 5), bold=False)
         
     labels = resolve_label_collisions(peak_labels, font_main, font_sub, draw, min_dist_y=int(font_size * 1.25))
     
