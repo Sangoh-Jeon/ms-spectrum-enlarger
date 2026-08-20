@@ -3,21 +3,36 @@ import sys
 import io
 import re
 import ssl
+import json
 import concurrent.futures
 import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:
+    tk = None
+    filedialog = None
+    messagebox = None
+    ttk = None
 
-# Bypass SSL certificate check for EasyOCR model initialization
-ssl._create_default_https_context = ssl._create_unverified_context
-import easyocr
+# Lazy EasyOCR reader
+_easyocr_reader = None
 
-# Initialize EasyOCR reader (cached locally)
-reader = easyocr.Reader(['en'], gpu=False)
+def get_easyocr_reader():
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            ssl._create_default_https_context = ssl._create_unverified_context
+            import easyocr
+            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
+        except Exception as e:
+            print(f"EasyOCR reader init warning: {e}")
+            _easyocr_reader = None
+    return _easyocr_reader
 
 def get_base_dir():
     """
@@ -201,6 +216,9 @@ def extract_peaks_from_image(img_bytes, is_precursor=True):
     roi_scaled = cv2.resize(roi, (int(roi.shape[1] * 1.5), int(roi.shape[0] * 1.5)), interpolation=cv2.INTER_CUBIC)
     
     # Single EasyOCR call on ROI
+    reader = get_easyocr_reader()
+    if reader is None:
+        return {'all_peaks': [], 'default_checked': set()}
     results = reader.readtext(roi_scaled, allowlist='0123456789.')
     
     peaks = []
@@ -906,6 +924,9 @@ def main():
         out = process_excel_with_selections(excel_file, sheet_selections, font_size=48, status_callback=print)
         print(f"완료! 저장 위치: {out}")
     else:
+        if tk is None:
+            print("Tkinter GUI를 사용할 수 없는 환경입니다 (서버/클라우드 환경).")
+            return
         root = tk.Tk()
         app = AppGUI(root)
         root.mainloop()
