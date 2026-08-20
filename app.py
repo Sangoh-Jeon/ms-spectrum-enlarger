@@ -118,8 +118,8 @@ if uploaded_file is not None:
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             sheet_data[sheet_name] = {
-                'precursor': {'all_peaks': [], 'default_checked': set(), 'coords_map': {}},
-                'product':   {'all_peaks': [], 'default_checked': set(), 'coords_map': {}}
+                'precursor': {'all_peaks': [], 'default_checked': set(), 'min_mz': None, 'max_mz': None},
+                'product':   {'all_peaks': [], 'default_checked': set(), 'min_mz': None, 'max_mz': None}
             }
 
             for idx, img in enumerate(ws._images):
@@ -129,7 +129,10 @@ if uploaded_file is not None:
 
                 sheet_data[sheet_name][cat_key]['all_peaks'].extend(peak_info['all_peaks'])
                 sheet_data[sheet_name][cat_key]['default_checked'].update(peak_info['default_checked'])
-                sheet_data[sheet_name][cat_key]['coords_map'].update(peak_info.get('coords_map', {}))
+                
+                if peak_info.get('min_mz') is not None and peak_info.get('max_mz') is not None:
+                    sheet_data[sheet_name][cat_key]['min_mz'] = peak_info['min_mz']
+                    sheet_data[sheet_name][cat_key]['max_mz'] = peak_info['max_mz']
 
             for cat in ('precursor', 'product'):
                 sheet_data[sheet_name][cat]['all_peaks'] = sorted(
@@ -176,9 +179,13 @@ if uploaded_file is not None:
 
         st.markdown(label)
 
-        peaks      = peak_info['all_peaks']
-        defaults   = peak_info['default_checked']
-        coords_map = peak_info.get('coords_map', {})
+        min_m = peak_info.get('min_mz')
+        max_m = peak_info.get('max_mz')
+        if min_m is not None and max_m is not None:
+            st.caption(f"📐 분석된 스펙트럼 범위: **{min_m} ~ {max_m} Da**")
+
+        peaks    = peak_info['all_peaks']
+        defaults = peak_info['default_checked']
 
         if not peaks:
             st.info("검출된 피크가 없습니다.")
@@ -211,23 +218,14 @@ if uploaded_file is not None:
             key=f"editor_{ion_type}_{sheet_name}"
         )
 
-        results = []
-        for idx, row in edited.iterrows():
-            orig_mz = peaks[idx] if idx < len(peaks) else str(row['분자량(m/z)']).strip()
-            final_mz = str(row['분자량(m/z)']).strip()
-            is_mrm = bool(row['MRM 선택'])
-
-            # 원래 인식된 픽셀 좌표 가져오기
-            coord = coords_map.get(orig_mz, {})
-            results.append({
-                'orig_mz':  orig_mz,
-                'final_mz': final_mz,
-                'is_mrm':   is_mrm,
-                'cx':       coord.get('cx'),
-                'cy':       coord.get('cy')
-            })
-
-        return results
+        return [
+            {
+                'orig_mz':  peaks[idx] if idx < len(peaks) else str(row['분자량(m/z)']).strip(),
+                'final_mz': str(row['분자량(m/z)']).strip(),
+                'is_mrm':   bool(row['MRM 선택'])
+            }
+            for idx, row in edited.iterrows()
+        ]
     # ─────────────────────────────────────────────────────────────────────────
 
     sheet_names = list(sheet_peak_data.keys())
@@ -250,7 +248,17 @@ if uploaded_file is not None:
 
             sheet_selections[sheet_name] = {
                 'precursor': prec_selections,
-                'product':   prod_selections
+                'product':   prod_selections,
+                'range': {
+                    'precursor': {
+                        'min_mz': sheet_peak_data[sheet_name]['precursor'].get('min_mz'),
+                        'max_mz': sheet_peak_data[sheet_name]['precursor'].get('max_mz')
+                    },
+                    'product': {
+                        'min_mz': sheet_peak_data[sheet_name]['product'].get('min_mz'),
+                        'max_mz': sheet_peak_data[sheet_name]['product'].get('max_mz')
+                    }
+                }
             }
 
     st.markdown("---")
