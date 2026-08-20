@@ -139,14 +139,31 @@ if uploaded_file is not None:
             
         return sheet_data
 
-    with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
-        sheet_peak_data = analyze_excel_peaks(uploaded_file.getvalue())
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    
+    # 엑셀 파일 최초 업로드 시 1회만 분석 (체크박스 클릭 시 재분석 방지)
+    if "current_file_id" not in st.session_state or st.session_state["current_file_id"] != file_id or "sheet_peak_data" not in st.session_state:
+        with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
+            st.session_state["sheet_peak_data"] = analyze_excel_peaks(uploaded_file.getvalue())
+            st.session_state["current_file_id"] = file_id
+
+    sheet_peak_data = st.session_state.get("sheet_peak_data", {})
 
     last_err = get_last_ai_error()
     if last_err:
         st.error(f"⚠️ **Google AI 연동 안내**: {last_err}")
 
-    st.subheader("🎯 MRM 조건 이온 선택 및 분자량(m/z) 수기 수정")
+    col_title, col_rebtn = st.columns([3, 1])
+    with col_title:
+        st.subheader("🎯 MRM 조건 이온 선택 및 분자량(m/z) 수기 수정")
+    with col_rebtn:
+        if st.button("🔄 AI 피크 다시 분석", help="현재 파일을 처음부터 AI로 다시 분석합니다."):
+            if "current_file_id" in st.session_state:
+                del st.session_state["current_file_id"]
+            if "sheet_peak_data" in st.session_state:
+                del st.session_state["sheet_peak_data"]
+            st.rerun()
+
     st.caption("✓ OCR 오인식이 있다면 입력창에서 수기로 직접 변경할 수 있습니다. (Precursor 상위 1개, Product 상위 3개 자동 체크)")
 
     # Sheet Tabs

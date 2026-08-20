@@ -237,9 +237,17 @@ def _parse_gcp_vision_response(response, is_precursor):
     if not raw_peaks:
         return None
     corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
-    peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
-    top_limit = 1 if is_precursor else 3
-    default_checked = set(p['mz'] for p in peaks_by_height[:top_limit])
+    if is_precursor:
+        peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
+        default_checked = set(p['mz'] for p in peaks_by_height[:1])
+    else:
+        # Product Ion: Exclude largest m/z (residual precursor ion) from top 3 recommendations
+        max_mz = max((p['val_num'] for p in corrected_peaks), default=0)
+        candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5]
+        if not candidates:
+            candidates = corrected_peaks
+        peaks_by_height = sorted(candidates, key=lambda p: p['y_min'])
+        default_checked = set(p['mz'] for p in peaks_by_height[:3])
     all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
     return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Lens Cloud AI ⚡ (99.99%)'}
 
@@ -388,11 +396,19 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     gemini_raw = _get_gemini_raw_peaks(img_bytes)
     if gemini_raw:
         corrected_peaks = calibrate_and_correct_peaks(gemini_raw)
-        peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
-        top_limit = 1 if is_precursor else 3
-        default_checked = set(p['mz'] for p in peaks_by_height[:top_limit])
+        if is_precursor:
+            peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
+            default_checked = set(p['mz'] for p in peaks_by_height[:1])
+        else:
+            # Product Ion: Exclude largest m/z (residual precursor ion) from top 3 recommendations
+            max_mz = max((p['val_num'] for p in corrected_peaks), default=0)
+            candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5]
+            if not candidates:
+                candidates = corrected_peaks
+            peaks_by_height = sorted(candidates, key=lambda p: p['y_min'])
+            default_checked = set(p['mz'] for p in peaks_by_height[:3])
         all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
-        return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Gemini 2.0 Flash AI ⚡ (99.99%)'}
+        return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Gemini Flash AI ⚡ (99.99%)'}
 
     # 2. Try Google Cloud Vision API if configured
     key_path = auto_load_gcp_credentials()
