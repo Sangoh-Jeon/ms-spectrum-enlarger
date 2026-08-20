@@ -483,15 +483,24 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
             continue
 
         x_calc = calc_x(val_f)
-        x_calc = max(x_start + 5, min(x_end - 5, x_calc))
-
-        scan = max(15, min(30, int(px_per_da * 0.3)))
+        # 로컬 피크 정점 탐색:
+        # 물리적 스케일(px_per_da)에 맞춰 최대 ±0.35 Da (넓은 스캔에서는 2~4px, 좁은 줌에서는 15~20px) 범위만 정밀 탐색
+        # 인접 1 Da 피크가 옆의 거대 피크로 빨려 들어가는 현상(Black Hole Apex Stealing) 원천 차단
+        scan = max(2, min(20, int(px_per_da * 0.35)))
         x1 = max(x_start, x_calc - scan)
-        x2 = min(x_end, x_calc + scan)
+        x2 = min(x_end, x_calc + scan + 1)
 
         best_apex_x = x_calc
         best_apex_y = y_bottom
 
+        # 1차: x_calc 위치에서의 파란색 선 높이 우선 확보
+        if x_calc < w:
+            col_center = pure_blue[50:y_bottom, x_calc]
+            blue_idx_c = np.where(col_center)[0]
+            if len(blue_idx_c) > 0:
+                best_apex_y = 50 + np.min(blue_idx_c)
+
+        # 2차: ±scan 범위 내에서 해당 피크의 로컬 꼭대기(Apex) 탐색
         for scan_x in range(x1, x2):
             col = pure_blue[50:y_bottom, scan_x]
             blue_idx = np.where(col)[0]
