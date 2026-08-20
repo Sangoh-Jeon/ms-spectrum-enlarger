@@ -32,23 +32,28 @@ def load_gcp_creds_from_secrets():
     if not hasattr(st, "secrets"):
         return None
     try:
+        # 1. Direct section name
         if "gcp_service_account" in st.secrets:
             val = st.secrets["gcp_service_account"]
-            if hasattr(val, "to_dict"):
-                return val.to_dict()
-            elif isinstance(val, dict):
-                return dict(val)
-            elif isinstance(val, str):
-                return json.loads(val)
-        for k in ["gcp_service_account_json", "gcp_json", "gcp_key", "GOOGLE_APPLICATION_CREDENTIALS_JSON"]:
-            if k in st.secrets:
-                val = st.secrets[k]
-                if hasattr(val, "to_dict"):
-                    return val.to_dict()
-                elif isinstance(val, dict):
-                    return dict(val)
-                elif isinstance(val, str):
+            if hasattr(val, "to_dict"): return val.to_dict()
+            if isinstance(val, dict): return dict(val)
+            if isinstance(val, str): return json.loads(val)
+            
+        # 2. Iterate all keys in st.secrets
+        for k in st.secrets.keys():
+            val = st.secrets[k]
+            if isinstance(val, str) and ("service_account" in val or "private_key" in val):
+                try:
                     return json.loads(val)
+                except Exception:
+                    pass
+            if hasattr(val, "to_dict"):
+                d = val.to_dict()
+                if "private_key" in d or "type" in d:
+                    return d
+            elif isinstance(val, dict):
+                if "private_key" in val or "type" in val:
+                    return dict(val)
     except Exception:
         pass
     return None
@@ -75,10 +80,24 @@ st.markdown('<div class="sub-header">Analyst 등 질량분석 장비 엑셀 데�
 
 # Sidebar Options
 st.sidebar.header("⚙️ 엔진 & 확대 옵션 설정")
+
+# Direct JSON Key Paste fallback for ease of use
+with st.sidebar.expander("🔑 구글 키(JSON) 직접 등록 / Secrets 확인", expanded=(not has_gcp_key)):
+    custom_json = st.text_area("메모장 복사 내용(.json) 붙여넣기", height=120, placeholder="{\n  \"type\": \"service_account\",\n  ...\n}")
+    if custom_json.strip():
+        try:
+            d = json.loads(custom_json.strip())
+            if "type" in d or "private_key" in d:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"] = json.dumps(d)
+                has_gcp_key = True
+                st.success("✅ 구글 키가 실시간 적용되었습니다!")
+        except Exception as e:
+            st.error(f"JSON 형식 오류: {e}")
+
 if has_gcp_key:
     st.sidebar.success("⚡ **Google Lens AI 엔진 활성화됨** (정확도 99.99%)")
 else:
-    st.sidebar.warning("💻 **고속 로컬 OCR 엔진 가동 중** (st.secrets 키 입력 시 Google Lens AI 자동 전환)")
+    st.sidebar.warning("💻 **고속 로컬 OCR 엔진 가동 중** (구글 키 입력 시 99.99% Lens AI 자동 전환)")
 
 font_size = st.sidebar.slider("MRM 강조 폰트 크기 (pt)", min_value=24, max_value=72, value=48, step=2)
 st.sidebar.info("✓ 선택 이온: 파란색 48pt 강조\n✓ 기타 이온: 회색 46pt 표시")
