@@ -538,73 +538,81 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     roi = out_img[y_top:y_bottom, x_start:x_end]
     roi[text_mask] = [255, 255, 255]
     
-    # 2. Determine m/z range for physical X-axis alignment
-    all_vals = []
-    if peak_overrides:
-        for item in peak_overrides:
-            try: all_vals.append(float(item.get('final_mz', item.get('orig_mz'))))
-            except Exception: pass
-            
-    if all_vals:
-        min_v, max_v = min(all_vals), max(all_vals)
-        if is_precursor:
-            if max_v <= 210.0:
-                mz_min, mz_max = 0.0, 200.0
-            elif max_v <= 520.0:
-                mz_min, mz_max = 50.0, 500.0
-            elif max_v <= 1020.0:
-                mz_min, mz_max = 50.0, 1000.0
-            else:
-                mz_min, mz_max = 0.0, float(int(np.ceil(max_v / 100.0) * 100.0))
-        else: # Product scan
-            if max_v <= 210.0:
-                mz_min, mz_max = 0.0, 200.0
-            elif max_v <= 360.0:
-                mz_min, mz_max = 0.0, 350.0
-            elif max_v <= 520.0:
-                mz_min, mz_max = 0.0, 500.0
-            elif max_v <= 1020.0:
-                mz_min, mz_max = 0.0, 1000.0
-            else:
-                mz_min, mz_max = 0.0, float(int(np.ceil(max_v / 100.0) * 100.0))
+    # 2. Filter peaks and determine physical X-axis alignment
+    if is_precursor:
+        # Precursor Scan: ONLY render selected MRM peaks (or the single main peak if none checked)
+        target_peaks = [item for item in peak_overrides if item.get('is_mrm', False)]
+        if not target_peaks and peak_overrides:
+            target_peaks = [peak_overrides[-1]]
     else:
-        mz_min, mz_max = (50.0, 500.0) if is_precursor else (0.0, 350.0)
-        
-    peak_labels = []
-    if peak_overrides:
-        for item in peak_overrides:
-            orig_mz = item['orig_mz']
-            final_mz = item.get('final_mz', orig_mz)
-            is_mrm = item.get('is_mrm', False)
+        # Product Scan: ALWAYS render all MRM peaks, and at most 5 distinct non-MRM peaks
+        mrm_peaks = [item for item in peak_overrides if item.get('is_mrm', False)]
+        non_mrm = [item for item in peak_overrides if not item.get('is_mrm', False)]
+        distinct_non_mrm = []
+        for item in non_mrm:
             try:
-                val_f = float(final_mz)
+                val_f = float(item.get('final_mz', item.get('orig_mz')))
             except ValueError:
                 continue
-                
-            x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
-            x_calc = max(x_start + 15, min(x_end - 15, x_calc))
+            all_curr = [float(p.get('final_mz', p.get('orig_mz'))) for p in (mrm_peaks + distinct_non_mrm)]
+            if all(abs(val_f - c) >= 8.0 for c in all_curr):
+                distinct_non_mrm.append(item)
+        target_peaks = mrm_peaks + distinct_non_mrm[:5]
+        
+    all_vals = []
+    for item in target_peaks:
+        try:
+            all_vals.append(float(item.get('final_mz', item.get('orig_mz'))))
+        except ValueError:
+            pass
+    max_v = max(all_vals, default=350.0)
+    
+    # Exact physical scale calibration based on Analyst grid bounds
+    if is_precursor:
+        if max_v <= 210.0:
+            def calc_x(mz): return int(40 + (mz - 30.0) * 13.48)
+        else:
+            def calc_x(mz): return int(59 + (mz - 50.0) * 4.75333)
+    else:
+        if max_v <= 210.0:
+            def calc_x(mz): return int(40 + (mz - 30.0) * 13.48)
+        else:
+            def calc_x(mz): return int(59 + (mz - 20.0) * 6.684375)
             
-            # Scan true peak apex from baseline upwards (ignoring y < 80 top grid)
-            x1 = max(x_start, x_calc - 30)
-            x2 = min(x_end, x_calc + 30)
-            best_apex_x = x_calc
-            best_apex_y = y_bottom
+    peak_labels = []
+    for item in target_peaks:
+        orig_mz = item.get('orig_mz', '')
+        final_mz = item.get('final_mz', orig_mz)
+        is_mrm = item.get('is_mrm', False)
+        try:
+            val_f = float(final_mz)
+        except ValueError:
+            continue
             
-            for cx in range(x1, x2):
-                col = pure_blue[80:y_bottom, cx]
-                blue_idx = np.where(col)[0]
-                if len(blue_idx) > 0:
-                    top_y = 80 + np.min(blue_idx)
-                    if top_y < best_apex_y:
-                        best_apex_y = top_y
-                        best_apex_x = cx
-                        
-            peak_labels.append({
-                'text': final_mz,
-                'center': (best_apex_x, best_apex_y),
-                'bbox': (best_apex_x - 40, best_apex_y - 15, best_apex_x + 40, best_apex_y + 15),
-                'is_mrm': is_mrm
-            })
+        x_calc = calc_x(val_f)
+        x_calc = max(x_start + 15, min(x_end - 15, x_calc))
+        
+        # Scan true peak apex from baseline upwards (ignoring y < 80 top grid)
+        x1 = max(x_start, x_calc - 25)
+        x2 = min(x_end, x_calc + 25)
+        best_apex_x = x_calc
+        best_apex_y = y_bottom
+        
+        for cx in range(x1, x2):
+            col = pure_blue[80:y_bottom, cx]
+            blue_idx = np.where(col)[0]
+            if len(blue_idx) > 0:
+                top_y = 80 + np.min(blue_idx)
+                if top_y < best_apex_y:
+                    best_apex_y = top_y
+                    best_apex_x = cx
+                    
+        peak_labels.append({
+            'text': final_mz,
+            'center': (best_apex_x, best_apex_y),
+            'bbox': (best_apex_x - 40, best_apex_y - 15, best_apex_x + 40, best_apex_y + 15),
+            'is_mrm': is_mrm
+        })
     else:
         raw_peaks = _get_raw_peaks_for_image(img_bytes, img)
         corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
