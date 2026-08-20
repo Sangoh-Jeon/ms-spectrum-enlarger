@@ -189,27 +189,37 @@ if uploaded_file is not None:
                     st.info("검출된 피크가 없습니다.")
                 else:
                     prec_rows = []
-                    for mz in prec_peaks:
+                    for idx, mz in enumerate(prec_peaks, start=1):
                         is_chk = (mz in prec_defaults)
-                        prec_rows.append({"MRM 선택": is_chk, "분자량 (m/z) 수기수정": mz, "비고": "⭐ 최고 피크" if is_chk else ""})
+                        prec_rows.append({
+                            "순번": idx,
+                            "MRM 선택": is_chk,
+                            "분자량(m/z)": mz,
+                            "비고": "⭐ 최고 피크" if is_chk else ""
+                        })
                     
                     df_prec = pd.DataFrame(prec_rows)
+                    table_height_prec = min(1000, max(280, (len(df_prec) + 1) * 36 + 35))
+                    
                     edited_prec = st.data_editor(
                         df_prec,
                         column_config={
-                            "MRM 선택": st.column_config.CheckboxColumn("MRM 선택", default=False),
-                            "분자량 (m/z) 수기수정": st.column_config.TextColumn("분자량 (m/z) 수기수정", required=True),
+                            "순번": st.column_config.NumberColumn("순번", disabled=True, width="small"),
+                            "MRM 선택": st.column_config.CheckboxColumn("MRM 선택", default=False, width="small"),
+                            "분자량(m/z)": st.column_config.TextColumn("분자량(m/z)", required=True),
                             "비고": st.column_config.TextColumn("비고", disabled=True)
                         },
-                        disabled=["비고"],
+                        disabled=["순번", "비고"],
                         hide_index=True,
+                        height=table_height_prec,
+                        use_container_width=True,
                         key=f"editor_prec_{sheet_name}"
                     )
                     
                     for _, row in edited_prec.iterrows():
                         sheet_selections[sheet_name]['precursor'].append({
-                            'orig_mz': row['분자량 (m/z) 수기수정'],
-                            'final_mz': str(row['분자량 (m/z) 수기수정']).strip(),
+                            'orig_mz': row['분자량(m/z)'],
+                            'final_mz': str(row['분자량(m/z)']).strip(),
                             'is_mrm': bool(row['MRM 선택'])
                         })
 
@@ -224,27 +234,37 @@ if uploaded_file is not None:
                     st.info("검출된 피크가 없습니다.")
                 else:
                     prod_rows = []
-                    for mz in prod_peaks:
+                    for idx, mz in enumerate(prod_peaks, start=1):
                         is_chk = (mz in prod_defaults)
-                        prod_rows.append({"MRM 선택": is_chk, "분자량 (m/z) 수기수정": mz, "비고": "⭐ 상위 추천" if is_chk else ""})
+                        prod_rows.append({
+                            "순번": idx,
+                            "MRM 선택": is_chk,
+                            "분자량(m/z)": mz,
+                            "비고": "⭐ 상위 추천" if is_chk else ""
+                        })
                     
                     df_prod = pd.DataFrame(prod_rows)
+                    table_height_prod = min(1200, max(350, (len(df_prod) + 1) * 36 + 35))
+                    
                     edited_prod = st.data_editor(
                         df_prod,
                         column_config={
-                            "MRM 선택": st.column_config.CheckboxColumn("MRM 선택", default=False),
-                            "분자량 (m/z) 수기수정": st.column_config.TextColumn("분자량 (m/z) 수기수정", required=True),
+                            "순번": st.column_config.NumberColumn("순번", disabled=True, width="small"),
+                            "MRM 선택": st.column_config.CheckboxColumn("MRM 선택", default=False, width="small"),
+                            "분자량(m/z)": st.column_config.TextColumn("분자량(m/z)", required=True),
                             "비고": st.column_config.TextColumn("비고", disabled=True)
                         },
-                        disabled=["비고"],
+                        disabled=["순번", "비고"],
                         hide_index=True,
+                        height=table_height_prod,
+                        use_container_width=True,
                         key=f"editor_prod_{sheet_name}"
                     )
                     
                     for _, row in edited_prod.iterrows():
                         sheet_selections[sheet_name]['product'].append({
-                            'orig_mz': row['분자량 (m/z) 수기수정'],
-                            'final_mz': str(row['분자량 (m/z) 수기수정']).strip(),
+                            'orig_mz': row['분자량(m/z)'],
+                            'final_mz': str(row['분자량(m/z)']).strip(),
                             'is_mrm': bool(row['MRM 선택'])
                         })
 

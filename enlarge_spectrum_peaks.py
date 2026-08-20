@@ -296,7 +296,7 @@ def _get_dynamic_gemini_models(api_key):
     return ["gemini-3.6-flash", "gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 def _get_gemini_raw_peaks(img_bytes):
-    """Calls Google Gemini REST API with dynamic active model discovery."""
+    """Calls Google Gemini REST API with dynamic active model discovery and coordinate scaling."""
     global _last_ai_error
     _last_ai_error = None
     
@@ -305,19 +305,26 @@ def _get_gemini_raw_peaks(img_bytes):
         _last_ai_error = "Gemini API 키가 설정되지 않았습니다."
         return []
         
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img_cv is None:
+        img_h, img_w = 1200, 2200
+    else:
+        img_h, img_w = img_cv.shape[:2]
+
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     
-    prompt = """
-Examine this LC-MS/MS mass spectrum image.
-Identify all the numerical m/z peak labels (such as 336.06, 76.99, 183.07, 325.11, etc. written near the tops of spectral peaks).
+    prompt = f"""
+Examine this LC-MS/MS mass spectrum image (Width: {img_w}px, Height: {img_h}px).
+Identify all numerical m/z peak labels (such as 336.06, 76.99, 183.07, 325.11, etc.) written directly above or near spectral peaks.
 Do not extract axis numbers.
 
 Return ONLY a JSON object:
-{
+{{
   "peaks": [
-    {"mz": 336.06, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}
+    {{"mz": 336.06, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}}
   ]
-}
+}}
 """
     active_models = _get_dynamic_gemini_models(api_key)
     errors = []
@@ -358,11 +365,41 @@ Return ONLY a JSON object:
                         val_str = f"{val_num:.2f}"
                         if val_str in seen: continue
                         seen.add(val_str)
-                        ymin = int(p.get("ymin", 200))
-                        xmin = int(p.get("xmin", 200))
-                        xmax = int(p.get("xmax", xmin + 80))
-                        ymax = int(p.get("ymax", ymin + 30))
+                        
+                        ymin_raw = float(p.get("ymin", 200))
+                        xmin_raw = float(p.get("xmin", 200))
+                        xmax_raw = float(p.get("xmax", xmin_raw + 80))
+                        ymax_raw = float(p.get("ymax", ymin_raw + 30))
+                        
+                        # Convert normalized 0..1000 scale to actual pixel coordinates
+                        if xmax_raw <= 1000 and img_w > 1200:
+                            xmin = int((xmin_raw / 1000.0) * img_w)
+                            xmax = int((xmax_raw / 1000.0) * img_w)
+                            ymin = int((ymin_raw / 1000.0) * img_h)
+                            ymax = int((ymax_raw / 1000.0) * img_h)
+                        else:
+                            xmin = int(xmin_raw)
+                            xmax = int(xmax_raw)
+                            ymin = int(ymin_raw)
+                            ymax = int(ymax_raw)
+                            
                         cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
+                        
+                        # Snap to actual blue peak curve apex if detected
+                        if img_cv is not None:
+                            x1 = max(0, cx - 40)
+                            x2 = min(img_w, cx + 40)
+                            sub_b = img_cv[:, x1:x2, 0]
+                            sub_r = img_cv[:, x1:x2, 2]
+                            blue_line = (sub_b > 120) & (sub_b > sub_r + 30)
+                            ys, xs = np.where(blue_line)
+                            if len(ys) > 0:
+                                top_i = np.argmin(ys)
+                                cx = x1 + xs[top_i]
+                                cy = max(40, ys[top_i] - 10)
+                                xmin, xmax = cx - 40, cx + 40
+                                ymin, ymax = cy - 15, cy + 15
+                                
                         raw_peaks.append({
                             'mz': val_str,
                             'val_num': val_num,
@@ -521,24 +558,24 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
             'is_mrm': is_mrm
         })
         
-    # Erasure of original small text
+    # 100% Full Erasure of original small text & annotations in graph area
     out_img = img.copy()
-    b, g, r = cv2.split(out_img)
+    x_axis, y_axis = detect_axis_lines(img)
+    x1_plot = x_axis + 5
+    x2_plot = min(img.shape[1] - 15, 2180)
+    y1_plot = 35
+    y2_plot = y_axis - 10
     
-    for item in peak_labels:
-        x1, y1, x2, y2 = item['bbox']
-        pad_x, pad_y = 8, 5
-        px1, py1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        px2, py2 = min(img.shape[1], x2 + pad_x), min(img.shape[0], y2 + pad_y)
-        
-        roi_b = b[py1:py2, px1:px2]
-        roi_g = g[py1:py2, px1:px2]
-        roi_r = r[py1:py2, px1:px2]
-        
-        is_blue = (roi_b > 120) & (roi_b > roi_r + 20)
-        text_or_bg = ~is_blue
-        roi_img = out_img[py1:py2, px1:px2]
-        roi_img[text_or_bg] = [255, 255, 255]
+    b, g, r = cv2.split(out_img)
+    is_blue = (b > 110) & (b > r + 25) & (b > g + 5)
+    gray = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
+    
+    plot_gray = gray[y1_plot:y2_plot, x1_plot:x2_plot]
+    plot_blue = is_blue[y1_plot:y2_plot, x1_plot:x2_plot]
+    text_mask = (plot_gray < 235) & (~plot_blue)
+    
+    roi = out_img[y1_plot:y2_plot, x1_plot:x2_plot]
+    roi[text_mask] = [255, 255, 255]
         
     # Transparent Overlay with MRM styling (Blue 45pt vs Gray 40pt)
     img_rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
@@ -570,12 +607,8 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
             draw.line([start_pt, end_pt], fill=line_color, width=2)
             draw.ellipse([apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3], fill=line_color)
             
-        for ox in range(-2, 3):
-            for oy in range(-2, 3):
-                if ox != 0 or oy != 0:
-                    draw.text((tx + ox, ty + oy), txt, font=font, fill=(255, 255, 255, 240))
-            
-        draw.text((tx, ty), txt, font=font, fill=text_color)
+        # Draw text with transparent background and subtle outline for crisp readability
+        draw.text((tx, ty), txt, font=font, fill=text_color, stroke_width=2, stroke_fill=(255, 255, 255, 180))
         
     final_pil = Image.alpha_composite(pil_base, overlay).convert('RGB')
     
@@ -583,7 +616,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     final_pil.save(buf, format='PNG')
     return buf.getvalue()
 
-def process_excel_with_selections(excel_path, sheet_selections, font_size=48, status_callback=None):
+def process_excel_with_selections(excel_path, sheet_selections, font_size=45, status_callback=None):
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {excel_path}")
         
