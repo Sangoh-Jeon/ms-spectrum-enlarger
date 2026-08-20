@@ -19,7 +19,7 @@ from enlarge_spectrum_peaks import (
     process_excel_with_selections,
     auto_load_gcp_credentials,
     get_last_ai_error,
-    get_gemini_api_key,  # 중복 함수 제거: enlarge_spectrum_peaks.py 의 공용 함수 사용
+    get_gemini_api_key,
 )
 
 st.set_page_config(
@@ -29,20 +29,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ── API 키 로드 (enlarge_spectrum_peaks.get_gemini_api_key 공용 함수 활용) ──
+# ── API 키 로드 ──────────────────────────────────────────────────────────────
 active_gemini_key = get_gemini_api_key()
 if active_gemini_key:
     os.environ["GEMINI_API_KEY"] = active_gemini_key
 
-# Custom CSS styling for polished UI
+# Custom CSS
 st.markdown("""
 <style>
     .main-header { font-size: 26px; font-weight: bold; color: #003399; margin-bottom: 5px; }
     .sub-header { font-size: 14px; color: #555555; margin-bottom: 20px; }
     .stButton>button { background-color: #003399; color: white; font-weight: bold; border-radius: 8px; height: 3em; }
     .stDownloadButton>button { background-color: #28a745; color: white; font-weight: bold; border-radius: 8px; height: 3em; }
-
-    /* 대형 드래그 앤 드롭 영역 스타일링 */
     [data-testid="stFileUploaderDropzone"] {
         min-height: 200px !important;
         padding: 35px 20px !important;
@@ -74,10 +72,9 @@ st.markdown("""
 st.markdown('<div class="main-header">🧪 GLP 보고서용 질량분석(MS/MS) 피크 분자량(m/z) 글자 확대 웹 프로그램</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Analyst 등 질량분석 장비 엑셀 데이터를 올려주시면, MRM 선택 이온은 <b>파란색 45pt</b>, 기타 이온은 <b>회색 40pt</b>로 선명하게 확대한 엑셀 파일을 자동 생성합니다.</div>', unsafe_allow_html=True)
 
-# Sidebar Options
+# Sidebar
 st.sidebar.header("⚙️ 엔진 & 확대 옵션 설정")
 
-# Direct Gemini API Key Input
 with st.sidebar.expander("🔑 Google Gemini API 키 설정", expanded=(not bool(active_gemini_key))):
     custom_gemini_key = st.text_input("Gemini API 키 (AIzaSy...)", value=active_gemini_key, type="password", placeholder="AIzaSy로 시작하는 1줄 키")
     if custom_gemini_key.strip():
@@ -94,13 +91,13 @@ else:
 font_size = st.sidebar.slider("MRM 강조 폰트 크기 (pt)", min_value=20, max_value=72, value=45, step=1)
 st.sidebar.info(f"✓ 선택 이온: 파란색 {font_size}pt 강조\n✓ 기타 이온: 회색 {max(12, font_size - 5)}pt 표시")
 
-# File Upload Section
+# File Upload
 uploaded_file = st.file_uploader("📂 분석할 MS/MS 엑셀 파일 (.xlsx, .xls)을 올려주세요", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     st.success(f"📄 파일 업로드 완료: **{uploaded_file.name}**")
 
-    # ── 임시 파일 관리: 이전 업로드 임시 파일 삭제 후 새로 생성 ──────────────
+    # ── 임시 파일 관리: 이전 파일 삭제 후 새로 생성 ─────────────────────────
     prev_tmp = st.session_state.get("tmp_excel_path")
     if prev_tmp and os.path.exists(prev_tmp):
         try:
@@ -115,24 +112,37 @@ if uploaded_file is not None:
     # ─────────────────────────────────────────────────────────────────────────
 
     def analyze_excel_peaks(file_bytes):
-        """엑셀 내 모든 시트·이미지에서 AI로 피크를 추출합니다."""
+        """
+        엑셀 내 모든 시트·이미지에서 AI로 피크와 axis_ticks를 추출합니다.
+        반환값 구조:
+          {
+            sheet_name: {
+              'precursor': {'all_peaks': [...], 'default_checked': set(), 'axis_ticks': [...]},
+              'product':   {'all_peaks': [...], 'default_checked': set(), 'axis_ticks': [...]}
+            }
+          }
+        """
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
         sheet_data = {}
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             sheet_data[sheet_name] = {
-                'precursor': {'all_peaks': [], 'default_checked': set()},
-                'product': {'all_peaks': [], 'default_checked': set()}
+                'precursor': {'all_peaks': [], 'default_checked': set(), 'axis_ticks': []},
+                'product':   {'all_peaks': [], 'default_checked': set(), 'axis_ticks': []}
             }
 
             for idx, img in enumerate(ws._images):
                 is_precursor = (idx % 2 == 0)
-                peak_info = extract_peaks_with_google_vision(img._data(), is_precursor=is_precursor)
-                cat_key = 'precursor' if is_precursor else 'product'
+                peak_info    = extract_peaks_with_google_vision(img._data(), is_precursor=is_precursor)
+                cat_key      = 'precursor' if is_precursor else 'product'
 
                 sheet_data[sheet_name][cat_key]['all_peaks'].extend(peak_info['all_peaks'])
                 sheet_data[sheet_name][cat_key]['default_checked'].update(peak_info['default_checked'])
+
+                # axis_ticks: 마지막으로 분석한 이미지의 값을 사용 (이미지별 1개 기준)
+                if peak_info.get('axis_ticks'):
+                    sheet_data[sheet_name][cat_key]['axis_ticks'] = peak_info['axis_ticks']
 
             for cat in ('precursor', 'product'):
                 sheet_data[sheet_name][cat]['all_peaks'] = sorted(
@@ -144,15 +154,13 @@ if uploaded_file is not None:
 
     file_id = f"{uploaded_file.name}_{uploaded_file.size}"
 
-    # 엑셀 파일 최초 업로드 시 1회만 분석 (체크박스 클릭 시 재분석 방지)
     if ("current_file_id" not in st.session_state
             or st.session_state["current_file_id"] != file_id
             or "sheet_peak_data" not in st.session_state):
         with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
             st.session_state["sheet_peak_data"] = analyze_excel_peaks(uploaded_file.getvalue())
             st.session_state["current_file_id"] = file_id
-            if "generated_file" in st.session_state:
-                del st.session_state["generated_file"]
+            st.session_state.pop("generated_file", None)
 
     sheet_peak_data = st.session_state.get("sheet_peak_data", {})
 
@@ -171,20 +179,30 @@ if uploaded_file is not None:
 
     st.caption("✓ OCR 오인식이 있다면 입력창에서 수기로 직접 변경할 수 있습니다. (Precursor 상위 1개, Product 상위 3개 자동 체크)")
 
-    # ── 공통 피크 에디터 렌더링 함수 (Precursor/Product 중복 코드 통합) ──────
+    # ── 공통 피크 에디터 렌더링 함수 ─────────────────────────────────────────
     def render_peak_editor(sheet_name: str, ion_type: str, peak_info: dict) -> list:
         """
         Precursor 또는 Product 피크 에디터를 렌더링하고 선택 결과를 반환합니다.
-        ion_type: 'precursor' | 'product'
+        axis_ticks는 peak_info에서 직접 읽으며 반환값에는 포함되지 않습니다
+        (axis_ticks는 sheet_selections에 별도로 저장됩니다).
         """
-        is_prec = (ion_type == 'precursor')
-        icon = "🔹" if is_prec else "🔸"
-        label = f"##### {icon} {'Precursor' if is_prec else 'Product (Fragment)'} Ion 피크 목록"
+        is_prec    = (ion_type == 'precursor')
+        icon       = "🔹" if is_prec else "🔸"
+        label      = f"##### {icon} {'Precursor' if is_prec else 'Product (Fragment)'} Ion 피크 목록"
         star_label = "⭐ 최고 피크" if is_prec else "⭐ 상위 추천"
         height_range = (280, 1000) if is_prec else (350, 1200)
 
         st.markdown(label)
-        peaks = peak_info['all_peaks']
+
+        # axis_ticks 수신 상태 표시
+        ticks = peak_info.get('axis_ticks', [])
+        if ticks:
+            tick_str = ", ".join(f"{t['mz']} Da→{t['pixel_x']}px" for t in ticks[:3])
+            st.caption(f"📐 X축 보정 눈금 {len(ticks)}개 수신: {tick_str}")
+        else:
+            st.caption("⚠️ X축 보정 눈금 미수신 — 고정 상수 폴백 사용")
+
+        peaks    = peak_info['all_peaks']
         defaults = peak_info['default_checked']
 
         if not peaks:
@@ -193,23 +211,23 @@ if uploaded_file is not None:
 
         rows = [
             {
-                "순번": idx,
-                "MRM 선택": (mz in defaults),
+                "순번":       idx,
+                "MRM 선택":   (mz in defaults),
                 "분자량(m/z)": mz,
-                "비고": star_label if (mz in defaults) else ""
+                "비고":       star_label if (mz in defaults) else ""
             }
             for idx, mz in enumerate(peaks, start=1)
         ]
-        df = pd.DataFrame(rows)
+        df           = pd.DataFrame(rows)
         table_height = min(height_range[1], max(height_range[0], (len(df) + 1) * 36 + 35))
 
         edited = st.data_editor(
             df,
             column_config={
-                "순번": st.column_config.NumberColumn("순번", disabled=True, width="small"),
-                "MRM 선택": st.column_config.CheckboxColumn("MRM 선택", default=False, width="small"),
+                "순번":       st.column_config.NumberColumn("순번", disabled=True, width="small"),
+                "MRM 선택":   st.column_config.CheckboxColumn("MRM 선택", default=False, width="small"),
                 "분자량(m/z)": st.column_config.TextColumn("분자량(m/z)", required=True),
-                "비고": st.column_config.TextColumn("비고", disabled=True),
+                "비고":       st.column_config.TextColumn("비고", disabled=True),
             },
             disabled=["순번", "비고"],
             hide_index=True,
@@ -220,9 +238,9 @@ if uploaded_file is not None:
 
         return [
             {
-                'orig_mz': row['분자량(m/z)'],
+                'orig_mz':  row['분자량(m/z)'],
                 'final_mz': str(row['분자량(m/z)']).strip(),
-                'is_mrm': bool(row['MRM 선택'])
+                'is_mrm':   bool(row['MRM 선택'])
             }
             for _, row in edited.iterrows()
         ]
@@ -230,28 +248,35 @@ if uploaded_file is not None:
 
     # Sheet Tabs
     sheet_names = list(sheet_peak_data.keys())
-    tabs = st.tabs([f"📄 {name}" for name in sheet_names])
-
+    tabs        = st.tabs([f"📄 {name}" for name in sheet_names])
     sheet_selections = {}
 
     for tab, sheet_name in zip(tabs, sheet_names):
         with tab:
-            sheet_selections[sheet_name] = {'precursor': [], 'product': []}
             col1, col2 = st.columns(2)
 
             with col1:
-                sheet_selections[sheet_name]['precursor'] = render_peak_editor(
+                prec_selections = render_peak_editor(
                     sheet_name, 'precursor', sheet_peak_data[sheet_name]['precursor']
                 )
 
             with col2:
-                sheet_selections[sheet_name]['product'] = render_peak_editor(
+                prod_selections = render_peak_editor(
                     sheet_name, 'product', sheet_peak_data[sheet_name]['product']
                 )
 
+            # axis_ticks를 sheet_selections에 함께 저장 (렌더링과 별개로 처리)
+            sheet_selections[sheet_name] = {
+                'precursor': prec_selections,
+                'product':   prod_selections,
+                'axis_ticks': {
+                    'precursor': sheet_peak_data[sheet_name]['precursor'].get('axis_ticks', []),
+                    'product':   sheet_peak_data[sheet_name]['product'].get('axis_ticks', []),
+                }
+            }
+
     st.markdown("---")
 
-    # Process & Generate Button
     if st.button("🚀 MRM 이온 확대 적용 및 엑셀 파일 생성", use_container_width=True):
         with st.spinner(f"✨ 선택한 MRM 조건(파란색 {font_size}pt / 회색 {max(12, font_size - 5)}pt)으로 스펙트럼 변환 및 엑셀 생성 중입니다..."):
             try:
@@ -264,12 +289,12 @@ if uploaded_file is not None:
                 with open(output_excel_path, "rb") as f:
                     result_bytes = f.read()
 
-                orig_name, ext = os.path.splitext(uploaded_file.name)
+                orig_name, ext   = os.path.splitext(uploaded_file.name)
                 download_filename = f"{orig_name}_확대{ext}"
 
                 st.session_state["generated_file"] = {
-                    "bytes": result_bytes,
-                    "filename": download_filename,
+                    "bytes":         result_bytes,
+                    "filename":      download_filename,
                     "auto_download": True
                 }
                 st.balloons()
@@ -277,17 +302,16 @@ if uploaded_file is not None:
             except Exception as e:
                 st.error(f"❌ 엑셀 처리 중 오류 발생: {str(e)}")
 
-    # Persistent Download Section (Never disappears upon clicking download)
+    # Persistent Download Section
     if "generated_file" in st.session_state:
-        gen_info = st.session_state["generated_file"]
+        gen_info  = st.session_state["generated_file"]
         res_bytes = gen_info["bytes"]
         dl_filename = gen_info["filename"]
 
         if gen_info.get("auto_download", False):
             gen_info["auto_download"] = False
-            b64_file = base64.b64encode(res_bytes).decode('utf-8')
-            # json.dumps 로 파일명 이스케이프 → 특수문자·따옴표 포함 시 JS 오류 방지
-            safe_filename = json.dumps(dl_filename)
+            b64_file      = base64.b64encode(res_bytes).decode('utf-8')
+            safe_filename = json.dumps(dl_filename)  # XSS 방지 이스케이프
             auto_dl_js = f"""
             <script>
                 (function() {{
