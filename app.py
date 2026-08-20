@@ -2,6 +2,7 @@ import os
 import sys
 import io
 import json
+import base64
 import tempfile
 import openpyxl
 import pandas as pd

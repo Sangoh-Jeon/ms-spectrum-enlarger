@@ -427,14 +427,52 @@ Return ONLY a JSON object:
 
 def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     """
-    Extracts peak m/z values using Google Gemini 2.0 Flash / Vision AI engine.
+    Extracts peak m/z values and accurately ranks them by physical peak height (sensitivity / 감도).
     """
     # 1. Try Google Gemini Flash Vision AI (No billing / credit card required)
     gemini_raw = _get_gemini_raw_peaks(img_bytes)
     if gemini_raw:
         corrected_peaks = calibrate_and_correct_peaks(gemini_raw)
+        
+        # Measure real physical peak height from image for each peak
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_cv is not None:
+            x_axis, y_axis = detect_axis_lines(img_cv)
+            x_start = x_axis + 10
+            x_end = min(img_cv.shape[1] - 30, 2180)
+            
+            all_vals = [p['val_num'] for p in corrected_peaks]
+            if all_vals:
+                min_v, max_v = min(all_vals), max(all_vals)
+                mz_min = 50.0 if min_v >= 45.0 else 0.0
+                mz_max = 500.0 if max_v <= 520.0 else (1000.0 if max_v <= 1020.0 else float(int(np.ceil(max_v / 100.0) * 100.0)))
+            else:
+                mz_min, mz_max = 50.0, 500.0
+                
+            # Pure dark blue spectrum line mask
+            blue_line = (img_cv[:, :, 0] > 130) & (img_cv[:, :, 2] < 70) & (img_cv[:, :, 1] < 120)
+            
+            for p in corrected_peaks:
+                val_f = p['val_num']
+                x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
+                x1 = max(x_start, x_calc - 15)
+                x2 = min(x_end, x_calc + 15)
+                sub = blue_line[70:y_axis-10, x1:x2]
+                ys, xs = np.where(sub)
+                if len(ys) > 0:
+                    top_y = 70 + int(np.min(ys))
+                    p['height'] = int(y_axis - top_y)
+                    p['y_min'] = top_y
+                else:
+                    p['height'] = 0
+                    p['y_min'] = y_axis
+        else:
+            for p in corrected_peaks:
+                p['height'] = 0
+                
         if is_precursor:
-            peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
+            peaks_by_height = sorted(corrected_peaks, key=lambda p: p.get('height', 0), reverse=True)
             default_checked = set(p['mz'] for p in peaks_by_height[:1])
         else:
             # Product Ion: Exclude largest m/z (residual precursor ion) from top 3 recommendations
@@ -442,8 +480,9 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
             candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5]
             if not candidates:
                 candidates = corrected_peaks
-            peaks_by_height = sorted(candidates, key=lambda p: p['y_min'])
+            peaks_by_height = sorted(candidates, key=lambda p: p.get('height', 0), reverse=True)
             default_checked = set(p['mz'] for p in peaks_by_height[:3])
+            
         all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
         return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Gemini Flash AI ⚡ (99.99%)'}
 
