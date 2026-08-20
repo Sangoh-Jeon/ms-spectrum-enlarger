@@ -17,7 +17,8 @@ from enlarge_spectrum_peaks import (
     extract_peaks_with_google_vision,
     process_spectrum_image,
     process_excel_with_selections,
-    auto_load_gcp_credentials
+    auto_load_gcp_credentials,
+    get_last_ai_error
 )
 
 st.set_page_config(
@@ -140,6 +141,10 @@ if uploaded_file is not None:
 
     with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
         sheet_peak_data = analyze_excel_peaks(uploaded_file.getvalue())
+
+    last_err = get_last_ai_error()
+    if last_err:
+        st.error(f"⚠️ **Google AI 연동 안내**: {last_err}")
 
     st.subheader("🎯 MRM 조건 이온 선택 및 분자량(m/z) 수기 수정")
     st.caption("✓ OCR 오인식이 있다면 입력창에서 수기로 직접 변경할 수 있습니다. (Precursor 상위 1개, Product 상위 3개 자동 체크)")

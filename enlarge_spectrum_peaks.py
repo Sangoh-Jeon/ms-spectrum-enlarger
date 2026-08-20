@@ -255,25 +255,30 @@ def get_gemini_api_key():
         pass
     return os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", "")).strip()
 
+import base64
+import requests
+
+_last_ai_error = None
+
+def get_last_ai_error():
+    global _last_ai_error
+    return _last_ai_error
+
 def _get_gemini_raw_peaks(img_bytes):
-    """Calls Google Gemini 2.0 Flash Vision to extract precise numerical m/z peak values."""
+    """Calls Google Gemini REST API with base64 image."""
+    global _last_ai_error
+    _last_ai_error = None
+    
     api_key = get_gemini_api_key()
     if not api_key:
+        _last_ai_error = "Gemini API 키가 설정되지 않았습니다."
         return []
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
         
-        # Prefer Gemini 2.0 Flash, fallback to 1.5 Flash
-        try:
-            model = genai.GenerativeModel("gemini-2.0-flash")
-        except Exception:
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            
-        pil_img = Image.open(io.BytesIO(img_bytes))
-        prompt = """
+    b64_img = base64.b64encode(img_bytes).decode('utf-8')
+    
+    prompt = """
 Examine this LC-MS/MS mass spectrum image.
-Identify and extract all the numerical peak m/z values (numbers with decimals such as 336.06, 76.99, 183.07, 325.11, etc. written above or near spectral peaks).
+Identify all the numerical m/z peak labels (such as 336.06, 76.99, 183.07, 325.11, etc. written near the tops of spectral peaks).
 Do not extract axis numbers.
 
 Return ONLY a JSON object:
@@ -283,41 +288,66 @@ Return ONLY a JSON object:
   ]
 }
 """
-        resp = model.generate_content([prompt, pil_img])
-        text = resp.text.strip()
-        cleaned = text.replace("```json", "").replace("```", "").strip()
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if match:
-            data = json.loads(match.group(0))
-            raw_peaks = []
-            seen = set()
-            for p in data.get("peaks", []):
-                try:
-                    val_num = float(p["mz"])
-                    if not (10.0 <= val_num <= 2000.0): continue
-                    val_str = f"{val_num:.2f}"
-                    if val_str in seen: continue
-                    seen.add(val_str)
-                    ymin = int(p.get("ymin", 200))
-                    xmin = int(p.get("xmin", 200))
-                    xmax = int(p.get("xmax", xmin + 80))
-                    ymax = int(p.get("ymax", ymin + 30))
-                    cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
-                    raw_peaks.append({
-                        'mz': val_str,
-                        'val_num': val_num,
-                        'y_min': ymin,
-                        'x_min': xmin,
-                        'x_max': xmax,
-                        'y_max': ymax,
-                        'cx': cx,
-                        'cy': cy
-                    })
-                except Exception:
-                    pass
-            return raw_peaks
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
+    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": b64_img
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "response_mime_type": "application/json"
+            }
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, timeout=20)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                data = json.loads(text)
+                raw_peaks = []
+                seen = set()
+                for p in data.get("peaks", []):
+                    try:
+                        val_num = float(p["mz"])
+                        if not (10.0 <= val_num <= 2000.0): continue
+                        val_str = f"{val_num:.2f}"
+                        if val_str in seen: continue
+                        seen.add(val_str)
+                        ymin = int(p.get("ymin", 200))
+                        xmin = int(p.get("xmin", 200))
+                        xmax = int(p.get("xmax", xmin + 80))
+                        ymax = int(p.get("ymax", ymin + 30))
+                        cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
+                        raw_peaks.append({
+                            'mz': val_str,
+                            'val_num': val_num,
+                            'y_min': ymin,
+                            'x_min': xmin,
+                            'x_max': xmax,
+                            'y_max': ymax,
+                            'cx': cx,
+                            'cy': cy
+                        })
+                    except Exception:
+                        pass
+                if raw_peaks:
+                    return raw_peaks
+            else:
+                _last_ai_error = f"Gemini HTTP {resp.status_code}: {resp.text}"
+        except Exception as e:
+            _last_ai_error = f"Gemini 통신 오류: {e}"
+            
     return []
 
 def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
