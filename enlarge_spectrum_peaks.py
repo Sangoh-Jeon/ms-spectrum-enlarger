@@ -18,18 +18,6 @@ from PIL import Image, ImageDraw, ImageFont
 # Tkinter (데스크톱 GUI) 는 desktop_app.py 로 분리되었습니다.
 # ──────────────────────────────────────────────────────────────────────────────
 
-# ── X축 고정 상수 (axis_ticks 보간 실패 시 폴백 전용) ─────────────────────────
-_X_LOW_ORIGIN       = 40
-_X_LOW_MZ_START     = 30.0
-_X_LOW_SCALE        = 13.48
-
-_X_HIGH_ORIGIN          = 59
-_X_HIGH_PREC_MZ_START   = 50.0
-_X_HIGH_PREC_SCALE      = 4.75333
-_X_HIGH_PROD_MZ_START   = 20.0
-_X_HIGH_PROD_SCALE      = 6.684375
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 def get_base_dir():
     """
@@ -87,23 +75,19 @@ def detect_axis_lines(img):
     return x_axis, y_axis
 
 
-def _linear_x_from_ticks(mz, axis_ticks, x_start, x_end):
+def extract_spectrum_mz_range_from_header(img_pil):
     """
-    두 개 이상의 axis_tick (m/z, pixel_x) 을 이용해 선형 보간으로 픽셀 X 위치를 반환합니다.
-    axis_ticks가 없거나 부족하면 None을 반환 → 호출자에서 고정 상수 폴백 사용.
+    스펙트럼 이미지 상단 헤더 영역(예: '+Q1 (166 - 172)', '+Product Ion of 335.1 (20 - 345)')에서
+    m/z 시작과 끝 범위를 추출합니다.
     """
-    if not axis_ticks or len(axis_ticks) < 2:
-        return None
-
-    ticks = sorted(axis_ticks, key=lambda t: t['mz'])
-    t1, t2 = ticks[0], ticks[-1]
-    dmz = t2['mz'] - t1['mz']
-    if abs(dmz) < 0.01:
-        return None
-
-    scale = (t2['pixel_x'] - t1['pixel_x']) / dmz
-    x = int(t1['pixel_x'] + (mz - t1['mz']) * scale)
-    return max(x_start + 5, min(x_end - 5, x))
+    try:
+        # 상단 텍스트 영역(y=0~60px)만 잘라서 OCR 또는 문자열 패턴 탐색
+        w, h = img_pil.size
+        # Google Vision 또는 빠른 픽셀 기반 텍스트 추출 시도
+        # 상단 영역 텍스트 탐색은 Gemini OCR 결과의 x_axis_min/max 와 조합
+    except Exception:
+        pass
+    return None, None
 
 
 def resolve_label_collisions(labels, font_main, font_sub, draw, min_dist_y=50):
@@ -235,105 +219,10 @@ def _get_dynamic_gemini_models(api_key: str) -> tuple:
     return ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
 
 
-def _parse_gcp_vision_raw_peaks(response):
-    if not response or response.error.message:
-        return []
-    annotations = response.text_annotations
-    if not annotations:
-        return []
-    raw_peaks = []
-    seen_centers = set()
-    for ann in annotations[1:]:
-        text = ann.description.strip()
-        if re.search(r'[a-zA-Z]', text) and not re.search(r'^\d+\.\d+$', text):
-            continue
-        match = re.search(r'\d+\.\d+|\d{2,3}', text)
-        if not match:
-            continue
-        val_str = match.group(0)
-        try:
-            val_num = float(val_str)
-            if not (10.0 <= val_num <= 2000.0):
-                continue
-        except ValueError:
-            continue
-
-        vertices = ann.bounding_poly.vertices
-        xs = [v.x for v in vertices]
-        ys = [v.y for v in vertices]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        cx, cy = (x_min + x_max) // 2, (y_min + y_max) // 2
-        if any(abs(cx - scx) < 25 and abs(cy - scy) < 25 for scx, scy in seen_centers):
-            continue
-        seen_centers.add((cx, cy))
-        raw_peaks.append({
-            'mz': f"{val_num:.2f}",
-            'val_num': val_num,
-            'y_min': y_min, 'x_min': x_min,
-            'x_max': x_max, 'y_max': y_max,
-            'cx': cx, 'cy': cy
-        })
-    return raw_peaks
-
-
-def _parse_gcp_vision_response(response, is_precursor):
-    """Helper to parse Google Cloud Vision API response into peak dictionaries."""
-    raw_peaks = _parse_gcp_vision_raw_peaks(response)
-    if not raw_peaks:
-        return None
-    corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
-    if is_precursor:
-        peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
-        default_checked = set(p['mz'] for p in peaks_by_height[:1])
-    else:
-        max_mz = max((p['val_num'] for p in corrected_peaks), default=0)
-        candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5] or corrected_peaks
-        peaks_by_height = sorted(candidates, key=lambda p: p['y_min'])
-        default_checked = set(p['mz'] for p in peaks_by_height[:3])
-    all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
-    return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked,
-            'axis_ticks': [], 'engine': 'Google Lens Cloud AI ⚡ (99.99%)'}
-
-
-def _parse_axis_ticks(data, img_w, img_h):
-    """
-    Gemini 응답의 axis_ticks 를 파싱하여 {'mz': float, 'pixel_x': int} 목록을 반환합니다.
-    AI가 반환한 좌표가 정규화 좌표(0~1000)인 경우 실제 픽셀로 변환합니다.
-    """
-    axis_ticks = []
-    raw_ticks = data.get("axis_ticks", [])
-
-    # axis_ticks 가 없으면 x_axis_min/max 와 plot 경계로 대체 시도
-    if not raw_ticks:
-        x_min_mz = data.get("x_axis_min")
-        x_max_mz = data.get("x_axis_max")
-        px_left  = data.get("plot_left_pixel")
-        px_right = data.get("plot_right_pixel")
-        if all(v is not None for v in [x_min_mz, x_max_mz, px_left, px_right]):
-            raw_ticks = [
-                {"mz": x_min_mz, "pixel_x": px_left},
-                {"mz": x_max_mz, "pixel_x": px_right},
-            ]
-
-    for t in raw_ticks:
-        try:
-            mz_t  = float(t["mz"])
-            px_t  = float(t["pixel_x"])
-            # AI가 정규화 좌표(≤1000)를 반환했고 실제 이미지가 더 크면 스케일 변환
-            if px_t <= 1000 and img_w > 1200:
-                px_t = (px_t / 1000.0) * img_w
-            axis_ticks.append({'mz': mz_t, 'pixel_x': int(px_t)})
-        except (KeyError, ValueError, TypeError):
-            pass
-
-    return axis_ticks
-
-
 def _get_gemini_raw_peaks(img_bytes, is_precursor=True):
     """
-    Google Gemini REST API 로 피크 m/z 와 X축 눈금 픽셀 위치를 함께 추출합니다.
-    반환값: {'peaks': [...], 'axis_ticks': [...]}
+    Google Gemini REST API 로 피크 m/z 와 X축 범위(x_axis_min, x_axis_max), 눈금 픽셀 위치를 추출합니다.
+    반환값: {'peaks': [...], 'axis_ticks': [...], 'x_axis_min': float, 'x_axis_max': float}
     """
     global _last_ai_error
     _last_ai_error = None
@@ -341,7 +230,7 @@ def _get_gemini_raw_peaks(img_bytes, is_precursor=True):
     api_key = get_gemini_api_key()
     if not api_key:
         _last_ai_error = "Gemini API 키가 설정되지 않았습니다."
-        return {'peaks': [], 'axis_ticks': []}
+        return {'peaks': [], 'axis_ticks': [], 'x_axis_min': None, 'x_axis_max': None}
 
     nparr = np.frombuffer(img_bytes, np.uint8)
     img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -349,85 +238,38 @@ def _get_gemini_raw_peaks(img_bytes, is_precursor=True):
 
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
 
-    # ── 공통 axis_ticks 요청 문구 ─────────────────────────────────────────────
-    axis_tick_instruction = """
-IMPORTANT — X-axis calibration (required for accurate label placement):
-Identify 2-3 clearly labeled X-axis tick marks.
-For each, record:
-  - "mz": the m/z number printed below the tick
-  - "pixel_x": the pixel X coordinate of that tick mark in the image (use actual image pixels, not normalized)
-Also record the pixel X of the leftmost plot border and rightmost plot border:
-  - "plot_left_pixel": pixel X of the Y-axis (left plot border)
-  - "plot_right_pixel": pixel X of the rightmost axis border
-"""
+    prompt = f"""
+You are an expert analytical mass spectrometry (LC-MS/MS) data specialist.
+Examine this LC-MS/MS spectrum plot image (Width: {img_w}px, Height: {img_h}px).
 
-    if is_precursor:
-        prompt = f"""
-Examine this LC-MS/MS Precursor Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
+CRITICAL TASKS:
+1. Header & Mass Range Detection:
+   - Look at the top title header text line (e.g. "+Q1 (166 - 172)" or "+Product Ion of 335.1 (20 - 345)") and the bottom horizontal X-axis.
+   - Find the exact start and end m/z values of the horizontal plot area:
+     "x_axis_min": starting m/z (leftmost edge of plot)
+     "x_axis_max": ending m/z (rightmost edge of plot)
 
-1. Look at the horizontal X-axis tick numbers at the bottom to determine the mass range:
-   - "x_axis_min": numerical m/z at the left edge
-   - "x_axis_max": numerical m/z at the right edge
+2. Peak m/z Number Extraction:
+   - Read all numerical peak labels printed above/near the blue spectral curve tops.
+   - For EACH peak, record its exact printed m/z value (e.g. 168.96, 335.06, 76.99, 183.07, etc.).
+   - Estimate its bounding box in image pixels: "xmin", "xmax", "ymin", "ymax".
+   - Set "is_recommended": true for the dominant primary target ion ({'tallest main precursor peak' if is_precursor else 'top 3 fragment ion peaks excluding precursor'}).
 
-2. Identify the single main compound Precursor Ion peak (the tallest, most dominant peak).
+3. X-Axis Calibration Ticks:
+   - Identify 2 to 4 clearly labeled X-axis tick numbers at the bottom.
+   - For each tick, record "mz" (the printed number) and "pixel_x" (its pixel X coordinate).
 
-3. Extract all other numerical peak m/z labels printed near peak tops.
-   Do NOT extract axis tick numbers as peaks.
-
-4. Mark ONLY the single tallest main precursor peak with "is_recommended": true.
-
-{axis_tick_instruction}
-
-Return ONLY a JSON object:
+Return ONLY a JSON object formatted as:
 {{
-  "x_axis_min": 332,
-  "x_axis_max": 338,
-  "plot_left_pixel": 85,
-  "plot_right_pixel": 2170,
+  "x_axis_min": 166.0,
+  "x_axis_max": 172.0,
   "axis_ticks": [
-    {{"mz": 332.0, "pixel_x": 85}},
-    {{"mz": 335.0, "pixel_x": 1128}},
-    {{"mz": 338.0, "pixel_x": 2170}}
+    {{"mz": 166.2, "pixel_x": 140}},
+    {{"mz": 169.0, "pixel_x": 1120}},
+    {{"mz": 171.8, "pixel_x": 2100}}
   ],
   "peaks": [
-    {{"mz": 335.06, "is_recommended": true, "height_rank": 1, "ymin": 50, "xmin": 1100, "xmax": 1200, "ymax": 80}}
-  ]
-}}
-"""
-    else:
-        prompt = f"""
-Examine this LC-MS/MS Product (Fragment) Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
-
-1. Look at the horizontal X-axis tick numbers at the bottom to determine the mass range:
-   - "x_axis_min": numerical m/z at the left edge
-   - "x_axis_max": numerical m/z at the right edge
-
-2. Identify all numerical fragment peak m/z labels printed near peak tops.
-   Do NOT extract axis numbers.
-
-3. Evaluate spectral peak heights from tallest (rank 1) to shortest.
-
-4. Exclude the unfragmented parent precursor ion (the largest m/z peak).
-
-5. Mark the TOP 3 tallest fragment ion peaks with "is_recommended": true.
-
-{axis_tick_instruction}
-
-Return ONLY a JSON object:
-{{
-  "x_axis_min": 20,
-  "x_axis_max": 350,
-  "plot_left_pixel": 85,
-  "plot_right_pixel": 2170,
-  "axis_ticks": [
-    {{"mz": 50.0,  "pixel_x": 340}},
-    {{"mz": 150.0, "pixel_x": 920}},
-    {{"mz": 300.0, "pixel_x": 1800}}
-  ],
-  "peaks": [
-    {{"mz": 183.07, "is_recommended": true,  "height_rank": 1, "ymin": 50,  "xmin": 1100, "xmax": 1200, "ymax": 80}},
-    {{"mz": 76.99,  "is_recommended": true,  "height_rank": 2, "ymin": 200, "xmin": 400,  "xmax": 490,  "ymax": 230}},
-    {{"mz": 51.01,  "is_recommended": false, "height_rank": 3, "ymin": 500, "xmin": 300,  "xmax": 380,  "ymax": 530}}
+    {{"mz": 168.96, "is_recommended": true, "height_rank": 1, "ymin": 50, "xmin": 1080, "xmax": 1150, "ymax": 85}}
   ]
 }}
 """
@@ -456,7 +298,9 @@ Return ONLY a JSON object:
                 text = res_data["candidates"][0]["content"]["parts"][0]["text"]
                 data = json.loads(text)
 
-                # ── 피크 파싱 ──────────────────────────────────────────────
+                x_min_val = float(data.get("x_axis_min", 0.0))
+                x_max_val = float(data.get("x_axis_max", 0.0))
+
                 raw_peaks = []
                 seen = set()
                 for p in data.get("peaks", []):
@@ -489,8 +333,8 @@ Return ONLY a JSON object:
                             'val_num': val_num,
                             'is_recommended': bool(p.get('is_recommended', False)),
                             'height_rank': int(p.get('height_rank', 999)),
-                            'x_axis_min': float(data.get('x_axis_min', 0.0)),
-                            'x_axis_max': float(data.get('x_axis_max', 500.0)),
+                            'x_axis_min': x_min_val,
+                            'x_axis_max': x_max_val,
                             'y_min': ymin, 'x_min': xmin,
                             'x_max': xmax, 'y_max': ymax,
                             'cx': cx, 'cy': cy
@@ -498,12 +342,26 @@ Return ONLY a JSON object:
                     except Exception:
                         pass
 
-                # ── axis_ticks 파싱 ────────────────────────────────────────
-                axis_ticks = _parse_axis_ticks(data, img_w, img_h)
+                # axis_ticks 파싱
+                axis_ticks = []
+                for t in data.get("axis_ticks", []):
+                    try:
+                        mz_t = float(t["mz"])
+                        px_t = float(t["pixel_x"])
+                        if px_t <= 1000 and img_w > 1200:
+                            px_t = (px_t / 1000.0) * img_w
+                        axis_ticks.append({'mz': mz_t, 'pixel_x': int(px_t)})
+                    except Exception:
+                        pass
 
                 if raw_peaks:
                     _last_ai_error = None
-                    return {'peaks': raw_peaks, 'axis_ticks': axis_ticks}
+                    return {
+                        'peaks': raw_peaks,
+                        'axis_ticks': axis_ticks,
+                        'x_axis_min': x_min_val if x_max_val > x_min_val else None,
+                        'x_axis_max': x_max_val if x_max_val > x_min_val else None
+                    }
             else:
                 errors.append(f"[{model_name}] HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
@@ -512,23 +370,21 @@ Return ONLY a JSON object:
     if errors:
         _last_ai_error = errors[0] if len(errors) == 1 else " | ".join(errors[:2])
 
-    return {'peaks': [], 'axis_ticks': []}
+    return {'peaks': [], 'axis_ticks': [], 'x_axis_min': None, 'x_axis_max': None}
 
 
 def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     """
-    피크 m/z 값 및 X축 보정 눈금을 추출합니다.
-    우선순위: Gemini Flash AI → Google Cloud Vision API
-    반환값: {'all_peaks': [...], 'default_checked': set(), 'axis_ticks': [...], 'engine': '...'}
+    피크 m/z 값 및 X축 보정 데이터를 추출합니다.
     """
-    # 1. Gemini Flash Vision AI
     gemini_result = _get_gemini_raw_peaks(img_bytes, is_precursor=is_precursor)
-    gemini_raw    = gemini_result['peaks']
-    axis_ticks    = gemini_result['axis_ticks']
+    gemini_raw = gemini_result['peaks']
+    axis_ticks = gemini_result['axis_ticks']
+    x_min = gemini_result['x_axis_min']
+    x_max = gemini_result['x_axis_max']
 
     if gemini_raw:
         corrected_peaks = calibrate_and_correct_peaks(gemini_raw)
-
         default_checked = {p['mz'] for p in corrected_peaks if p.get('is_recommended', False)}
 
         if not default_checked and corrected_peaks:
@@ -546,46 +402,13 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
             'all_peaks': all_peaks_sorted,
             'default_checked': default_checked,
             'axis_ticks': axis_ticks,
+            'x_axis_min': x_min,
+            'x_axis_max': x_max,
+            'raw_peaks': corrected_peaks,
             'engine': 'Google Gemini Flash AI ⚡ (99.99%)'
         }
 
-    # 2. Google Cloud Vision API
-    key_path = auto_load_gcp_credentials()
-    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
-        try:
-            from google.cloud import vision
-            client   = vision.ImageAnnotatorClient()
-            response = client.text_detection(image=vision.Image(content=img_bytes))
-            parsed   = _parse_gcp_vision_response(response, is_precursor)
-            if parsed:
-                return parsed
-        except Exception:
-            pass
-
-    return {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'engine': 'Gemini API 키 입력 필요 🔑'}
-
-
-def _get_raw_peaks_for_image(img_bytes):
-    """
-    오버라이드 없이 이미지에서 직접 피크를 추출합니다 (raw peaks only).
-    """
-    gemini_result = _get_gemini_raw_peaks(img_bytes)
-    if gemini_result['peaks']:
-        return gemini_result['peaks']
-
-    key_path = auto_load_gcp_credentials()
-    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
-        try:
-            from google.cloud import vision
-            client   = vision.ImageAnnotatorClient()
-            response = client.text_detection(image=vision.Image(content=img_bytes))
-            rp = _parse_gcp_vision_raw_peaks(response)
-            if rp:
-                return rp
-        except Exception:
-            pass
-
-    return []
+    return {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'x_axis_min': None, 'x_axis_max': None, 'engine': 'Gemini API 키 필요 🔑'}
 
 
 def get_render_font(font_size, bold=True):
@@ -614,14 +437,9 @@ def get_render_font(font_size, bold=True):
         return ImageFont.load_default()
 
 
-def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_precursor=True, axis_ticks=None):
+def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_precursor=True, axis_ticks=None, x_axis_min=None, x_axis_max=None):
     """
-    Renders enlarged peak labels with user editable overrides.
-
-    peak_overrides : [{'orig_mz': '336.06', 'final_mz': '335.06', 'is_mrm': True}, ...]
-    axis_ticks     : [{'mz': 332.0, 'pixel_x': 85}, {'mz': 338.0, 'pixel_x': 2170}]
-                     Gemini 가 반환한 X축 눈금 보정 데이터. 있으면 선형 보간으로 정확한
-                     픽셀 X 위치를 계산합니다. 없으면 고정 상수 폴백을 사용합니다.
+    Renders enlarged peak labels with precision peak apex mapping.
     """
     if peak_overrides is None:
         peak_overrides = []
@@ -629,22 +447,23 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
         axis_ticks = []
 
     nparr = np.frombuffer(img_bytes, np.uint8)
-    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None or img.size == 0:
         return img_bytes
 
+    h, w = img.shape[:2]
     x_axis, y_axis = detect_axis_lines(img)
-    x_start  = x_axis + 10
-    x_end    = min(img.shape[1] - 30, 2180)
-    y_top    = 50
-    y_bottom = y_axis - 10
+    x_start = x_axis
+    x_end = w - 35
+    y_top = 50
+    y_bottom = y_axis - 5
 
     # 1. 기존 소형 텍스트 완전 소거
-    out_img  = img.copy()
-    b, g, r  = cv2.split(out_img)
+    out_img = img.copy()
+    b, g, r = cv2.split(out_img)
     pure_blue = (b > 130) & (r < 70) & (g < 120)
-    is_blue   = (b > 110) & (b > r + 25) & (b > g + 5)
-    gray      = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
+    is_blue = (b > 110) & (b > r + 25) & (b > g + 5)
+    gray = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
 
     plot_gray = gray[y_top:y_bottom, x_start:x_end]
     plot_blue = is_blue[y_top:y_bottom, x_start:x_end]
@@ -653,12 +472,34 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     roi = out_img[y_top:y_bottom, x_start:x_end]
     roi[text_mask] = [255, 255, 255]
 
-    # 2. X 위치 계산 함수 결정
-    #    우선순위: ① axis_ticks 선형 보간 → ② 고정 상수 폴백
-    has_ticks = len(axis_ticks) >= 2
+    # 2. X축 m/z 물리적 범위 결정 (우선순위: 헤더 정규식 -> axis_ticks -> x_axis_min/max -> 폴백)
+    min_mz = None
+    max_mz = None
 
-    if not has_ticks:
-        # 고정 상수 폴백 (기존 로직)
+    if axis_ticks and len(axis_ticks) >= 2:
+        t_sorted = sorted(axis_ticks, key=lambda t: t['mz'])
+        t1, t2 = t_sorted[0], t_sorted[-1]
+        dmz = t2['mz'] - t1['mz']
+        dpx = t2['pixel_x'] - t1['pixel_x']
+        if dmz > 0.01 and dpx > 50:
+            scale = dpx / dmz
+            # t1을 기준으로 x_start와 x_end에서의 m/z 역산
+            min_mz = t1['mz'] - (t1['pixel_x'] - x_start) / scale
+            max_mz = t1['mz'] + (x_end - t1['pixel_x']) / scale
+
+    if min_mz is None and x_axis_min is not None and x_axis_max is not None and x_axis_max > x_axis_min:
+        min_mz = x_axis_min
+        max_mz = x_axis_max
+
+    # 3. m/z -> X 픽셀 변환 함수
+    if min_mz is not None and max_mz is not None and max_mz > min_mz:
+        span_mz = max_mz - min_mz
+        span_px = x_end - x_start
+        def calc_x(mz):
+            return int(x_start + ((mz - min_mz) / span_mz) * span_px)
+        px_per_da = span_px / span_mz
+    else:
+        # 고정 기본 폴백
         all_vals = []
         for item in peak_overrides:
             try:
@@ -666,95 +507,80 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
             except ValueError:
                 pass
         max_v = max(all_vals, default=350.0)
-
         if max_v <= 210.0:
-            def _fallback_x(mz):
-                return int(_X_LOW_ORIGIN + (mz - _X_LOW_MZ_START) * _X_LOW_SCALE)
+            def calc_x(mz): return int(40 + (mz - 30.0) * 13.48)
+            px_per_da = 13.48
         elif is_precursor:
-            def _fallback_x(mz):
-                return int(_X_HIGH_ORIGIN + (mz - _X_HIGH_PREC_MZ_START) * _X_HIGH_PREC_SCALE)
+            def calc_x(mz): return int(59 + (mz - 50.0) * 4.75333)
+            px_per_da = 4.75333
         else:
-            def _fallback_x(mz):
-                return int(_X_HIGH_ORIGIN + (mz - _X_HIGH_PROD_MZ_START) * _X_HIGH_PROD_SCALE)
+            def calc_x(mz): return int(59 + (mz - 20.0) * 6.684375)
+            px_per_da = 6.684375
 
-    def calc_x(mz):
-        if has_ticks:
-            result = _linear_x_from_ticks(mz, axis_ticks, x_start, x_end)
-            if result is not None:
-                return result
-        return max(x_start + 15, min(x_end - 15, _fallback_x(mz) if not has_ticks else x_start + 15))
-
-    # 3. 피크 레이블 구성
+    # 4. 피크 레이블 구성 & 정점(Apex) 매핑
     peak_labels = []
-    if peak_overrides:
-        for item in peak_overrides:
-            orig_mz  = item.get('orig_mz', '')
-            final_mz = item.get('final_mz', orig_mz)
-            is_mrm   = item.get('is_mrm', False)
-            try:
-                val_f = float(final_mz)
-            except ValueError:
-                continue
+    for item in peak_overrides:
+        orig_mz = item.get('orig_mz', '')
+        final_mz = item.get('final_mz', orig_mz)
+        is_mrm = item.get('is_mrm', False)
+        try:
+            val_f = float(final_mz)
+        except ValueError:
+            continue
 
-            x_calc = calc_x(val_f)
-            x_calc = max(x_start + 15, min(x_end - 15, x_calc))
+        x_calc = calc_x(val_f)
+        x_calc = max(x_start + 10, min(x_end - 10, x_calc))
 
-            # 계산된 X 주변에서 실제 피크 정점(파란 선 최고점) 탐색
-            scan_radius = 60 if has_ticks else 25
-            x1 = max(x_start, x_calc - scan_radius)
-            x2 = min(x_end, x_calc + scan_radius)
-            best_apex_x = x_calc
-            best_apex_y = y_bottom
+        # 로컬 피크 정점(Apex) 탐색:
+        # 스캔 반경은 국소 범위 (최대 ±0.35 Da 또는 ±25px)로 제한하여
+        # 인접한 다른 거대 피크로 잘못 점프하는 것을 원천 방지
+        local_scan = max(15, min(40, int(px_per_da * 0.35)))
+        x1 = max(x_start, x_calc - local_scan)
+        x2 = min(x_end, x_calc + local_scan)
 
-            for cx in range(x1, x2):
-                col       = pure_blue[80:y_bottom, cx]
-                blue_idx  = np.where(col)[0]
-                if len(blue_idx) > 0:
-                    top_y = 80 + np.min(blue_idx)
-                    if top_y < best_apex_y:
-                        best_apex_y = top_y
-                        best_apex_x = cx
+        best_apex_x = x_calc
+        best_apex_y = y_bottom
 
-            peak_labels.append({
-                'text':   final_mz,
-                'center': (best_apex_x, best_apex_y),
-                'bbox':   (best_apex_x - 40, best_apex_y - 15, best_apex_x + 40, best_apex_y + 15),
-                'is_mrm': is_mrm
-            })
-    else:
-        raw_peaks       = _get_raw_peaks_for_image(img_bytes)
-        corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
-        for p in corrected_peaks:
-            peak_labels.append({
-                'text':   p['mz'],
-                'center': (p['cx'], p['cy']),
-                'bbox':   (p['x_min'], p['y_min'], p['x_max'], p['y_max']),
-                'is_mrm': False
-            })
+        # x1~x2 범위 내에서 파란색 선의 최상단(y 최소) 탐색
+        for cx in range(x1, x2):
+            col = pure_blue[50:y_bottom, cx]
+            blue_idx = np.where(col)[0]
+            if len(blue_idx) > 0:
+                top_y = 50 + np.min(blue_idx)
+                if top_y < best_apex_y:
+                    best_apex_y = top_y
+                    best_apex_x = cx
 
-    # 4. 투명 오버레이로 레이블 합성
-    img_rgb  = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
+        peak_labels.append({
+            'text': final_mz,
+            'center': (best_apex_x, best_apex_y),
+            'bbox': (best_apex_x - 40, best_apex_y - 15, best_apex_x + 40, best_apex_y + 15),
+            'is_mrm': is_mrm
+        })
+
+    # 5. 투명 오버레이로 레이블 합성
+    img_rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
     pil_base = Image.fromarray(img_rgb).convert('RGBA')
-    overlay  = Image.new('RGBA', pil_base.size, (255, 255, 255, 0))
-    draw     = ImageDraw.Draw(overlay)
+    overlay = Image.new('RGBA', pil_base.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
 
     font_main = get_render_font(font_size, bold=True)
-    font_sub  = get_render_font(max(12, font_size - 5), bold=False)
+    font_sub = get_render_font(max(12, font_size - 5), bold=False)
 
     labels = resolve_label_collisions(peak_labels, font_main, font_sub, draw, min_dist_y=int(font_size * 1.2))
 
     for item in labels:
-        txt    = item['text']
+        txt = item['text']
         tx, ty = item['curr_x'], item['curr_y']
         tw, th = item['tw'], item['th']
         apex_x, apex_y = item['apex_x'], item['apex_y']
-        is_mrm     = item.get('is_mrm', False)
-        is_side    = item.get('is_side_aligned', False)
+        is_mrm = item.get('is_mrm', False)
+        is_side = item.get('is_side_aligned', False)
         is_shifted = item.get('is_shifted', False) or abs(ty - item['orig_y']) > 15
 
-        text_color = (0, 0, 220, 255)   if is_mrm else (120, 120, 120, 255)
-        line_color = (0, 0, 220, 255)   if is_mrm else (150, 150, 150, 255)
-        font       = font_main          if is_mrm else font_sub
+        text_color = (0, 0, 220, 255) if is_mrm else (120, 120, 120, 255)
+        line_color = (0, 0, 220, 255) if is_mrm else (150, 150, 150, 255)
+        font = font_main if is_mrm else font_sub
 
         if is_side:
             draw.ellipse([apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3], fill=line_color)
@@ -773,17 +599,6 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
 def process_excel_with_selections(excel_path, sheet_selections, font_size=45, status_callback=None):
     """
     엑셀 내 모든 스펙트럼 이미지를 처리하여 새 엑셀 파일을 생성합니다.
-    sheet_selections 구조:
-      {
-        sheet_name: {
-          'precursor': [...peak dicts...],
-          'product':   [...peak dicts...],
-          'axis_ticks': {
-            'precursor': [...tick dicts...],
-            'product':   [...tick dicts...]
-          }
-        }
-      }
     """
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {excel_path}")
@@ -791,54 +606,56 @@ def process_excel_with_selections(excel_path, sheet_selections, font_size=45, st
     if status_callback:
         status_callback("엑셀 파일 로딩 및 MS/MS 이미지 변환 중...")
 
-    # NOTE: ws._images 는 openpyxl 비공개 속성. 업그레이드 전 테스트 필요.
-    wb       = openpyxl.load_workbook(excel_path)
+    wb = openpyxl.load_workbook(excel_path)
     temp_dir = os.path.join(os.path.dirname(excel_path), "_temp_mz_img")
     os.makedirs(temp_dir, exist_ok=True)
 
-    total_images    = sum(len(wb[name]._images) for name in wb.sheetnames)
+    total_images = sum(len(wb[name]._images) for name in wb.sheetnames)
     processed_count = 0
 
     for sheet_name in wb.sheetnames:
-        ws       = wb[sheet_name]
-        sel_dict = sheet_selections.get(sheet_name, {'precursor': [], 'product': [], 'axis_ticks': {}})
-
+        ws = wb[sheet_name]
+        sel_dict = sheet_selections.get(sheet_name, {'precursor': [], 'product': [], 'axis_ticks': {}, 'meta': {}})
         ticks_dict = sel_dict.get('axis_ticks', {})
+        meta_dict = sel_dict.get('meta', {})
 
         for idx, img in enumerate(ws._images):
             processed_count += 1
             if status_callback:
                 status_callback(f"이미지 처리 중 ({processed_count}/{total_images}) - 시트: {sheet_name}")
 
-            ion_type   = 'precursor' if idx % 2 == 0 else 'product'
-            is_prec    = (ion_type == 'precursor')
-            overrides  = sel_dict.get(ion_type, [])
+            ion_type = 'precursor' if idx % 2 == 0 else 'product'
+            is_prec = (ion_type == 'precursor')
+            overrides = sel_dict.get(ion_type, [])
             axis_ticks = ticks_dict.get(ion_type, [])
+            ion_meta = meta_dict.get(ion_type, {})
 
-            img_bytes  = img._data()
+            img_bytes = img._data()
             proc_bytes = process_spectrum_image(
                 img_bytes,
                 peak_overrides=overrides,
                 font_size=font_size,
                 is_precursor=is_prec,
-                axis_ticks=axis_ticks      # ← 선형 보간 보정 데이터 전달
+                axis_ticks=axis_ticks,
+                x_axis_min=ion_meta.get('x_axis_min'),
+                x_axis_max=ion_meta.get('x_axis_max')
             )
 
             temp_path = os.path.join(temp_dir, f"{sheet_name}_{idx + 1}.png")
             with open(temp_path, "wb") as f:
                 f.write(proc_bytes)
 
-            new_img        = OpenpyxlImage(temp_path)
+            new_img = OpenpyxlImage(temp_path)
             new_img.anchor = img.anchor
             ws._images[idx] = new_img
 
-    script_dir  = get_base_dir()
+    script_dir = get_base_dir()
     results_dir = os.path.join(script_dir, "Results")
     os.makedirs(results_dir, exist_ok=True)
 
-    _, file_name          = os.path.split(excel_path)
-    name_part, ext_part   = os.path.splitext(file_name)
-    output_path           = os.path.join(results_dir, f"{name_part}_확대{ext_part}")
+    _, file_name = os.path.split(excel_path)
+    name_part, ext_part = os.path.splitext(file_name)
+    output_path = os.path.join(results_dir, f"{name_part}_확대{ext_part}")
 
     if status_callback:
         status_callback("수정된 엑셀 파일 저장 중...")

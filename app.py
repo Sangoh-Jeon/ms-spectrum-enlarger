@@ -112,24 +112,14 @@ if uploaded_file is not None:
     # ─────────────────────────────────────────────────────────────────────────
 
     def analyze_excel_peaks(file_bytes):
-        """
-        엑셀 내 모든 시트·이미지에서 AI로 피크와 axis_ticks를 추출합니다.
-        반환값 구조:
-          {
-            sheet_name: {
-              'precursor': {'all_peaks': [...], 'default_checked': set(), 'axis_ticks': [...]},
-              'product':   {'all_peaks': [...], 'default_checked': set(), 'axis_ticks': [...]}
-            }
-          }
-        """
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
         sheet_data = {}
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             sheet_data[sheet_name] = {
-                'precursor': {'all_peaks': [], 'default_checked': set(), 'axis_ticks': []},
-                'product':   {'all_peaks': [], 'default_checked': set(), 'axis_ticks': []}
+                'precursor': {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'meta': {}},
+                'product':   {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'meta': {}}
             }
 
             for idx, img in enumerate(ws._images):
@@ -140,9 +130,13 @@ if uploaded_file is not None:
                 sheet_data[sheet_name][cat_key]['all_peaks'].extend(peak_info['all_peaks'])
                 sheet_data[sheet_name][cat_key]['default_checked'].update(peak_info['default_checked'])
 
-                # axis_ticks: 마지막으로 분석한 이미지의 값을 사용 (이미지별 1개 기준)
                 if peak_info.get('axis_ticks'):
                     sheet_data[sheet_name][cat_key]['axis_ticks'] = peak_info['axis_ticks']
+                
+                sheet_data[sheet_name][cat_key]['meta'] = {
+                    'x_axis_min': peak_info.get('x_axis_min'),
+                    'x_axis_max': peak_info.get('x_axis_max')
+                }
 
             for cat in ('precursor', 'product'):
                 sheet_data[sheet_name][cat]['all_peaks'] = sorted(
@@ -181,11 +175,6 @@ if uploaded_file is not None:
 
     # ── 공통 피크 에디터 렌더링 함수 ─────────────────────────────────────────
     def render_peak_editor(sheet_name: str, ion_type: str, peak_info: dict) -> list:
-        """
-        Precursor 또는 Product 피크 에디터를 렌더링하고 선택 결과를 반환합니다.
-        axis_ticks는 peak_info에서 직접 읽으며 반환값에는 포함되지 않습니다
-        (axis_ticks는 sheet_selections에 별도로 저장됩니다).
-        """
         is_prec    = (ion_type == 'precursor')
         icon       = "🔹" if is_prec else "🔸"
         label      = f"##### {icon} {'Precursor' if is_prec else 'Product (Fragment)'} Ion 피크 목록"
@@ -194,13 +183,15 @@ if uploaded_file is not None:
 
         st.markdown(label)
 
-        # axis_ticks 수신 상태 표시
         ticks = peak_info.get('axis_ticks', [])
-        if ticks:
+        meta = peak_info.get('meta', {})
+        if meta.get('x_axis_min') and meta.get('x_axis_max'):
+            st.caption(f"📐 X축 분석 범위: {meta['x_axis_min']} ~ {meta['x_axis_max']} Da")
+        elif ticks:
             tick_str = ", ".join(f"{t['mz']} Da→{t['pixel_x']}px" for t in ticks[:3])
-            st.caption(f"📐 X축 보정 눈금 {len(ticks)}개 수신: {tick_str}")
+            st.caption(f"📐 X축 보정 눈금: {tick_str}")
         else:
-            st.caption("⚠️ X축 보정 눈금 미수신 — 고정 상수 폴백 사용")
+            st.caption("⚠️ X축 보정 정보 수신 대기 중")
 
         peaks    = peak_info['all_peaks']
         defaults = peak_info['default_checked']
@@ -246,7 +237,6 @@ if uploaded_file is not None:
         ]
     # ─────────────────────────────────────────────────────────────────────────
 
-    # Sheet Tabs
     sheet_names = list(sheet_peak_data.keys())
     tabs        = st.tabs([f"📄 {name}" for name in sheet_names])
     sheet_selections = {}
@@ -265,13 +255,16 @@ if uploaded_file is not None:
                     sheet_name, 'product', sheet_peak_data[sheet_name]['product']
                 )
 
-            # axis_ticks를 sheet_selections에 함께 저장 (렌더링과 별개로 처리)
             sheet_selections[sheet_name] = {
                 'precursor': prec_selections,
                 'product':   prod_selections,
                 'axis_ticks': {
                     'precursor': sheet_peak_data[sheet_name]['precursor'].get('axis_ticks', []),
                     'product':   sheet_peak_data[sheet_name]['product'].get('axis_ticks', []),
+                },
+                'meta': {
+                    'precursor': sheet_peak_data[sheet_name]['precursor'].get('meta', {}),
+                    'product':   sheet_peak_data[sheet_name]['product'].get('meta', {}),
                 }
             }
 
@@ -311,7 +304,7 @@ if uploaded_file is not None:
         if gen_info.get("auto_download", False):
             gen_info["auto_download"] = False
             b64_file      = base64.b64encode(res_bytes).decode('utf-8')
-            safe_filename = json.dumps(dl_filename)  # XSS 방지 이스케이프
+            safe_filename = json.dumps(dl_filename)
             auto_dl_js = f"""
             <script>
                 (function() {{
