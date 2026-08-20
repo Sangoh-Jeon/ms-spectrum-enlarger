@@ -71,11 +71,14 @@ def detect_axis_lines(img):
         
     return x_axis, y_axis
 
-def resolve_label_collisions(labels, font_main, font_sub, draw, min_dist_y=55):
+def resolve_label_collisions(labels, font_main, font_sub, draw, min_dist_y=50):
     """
-    Anti-collision layout algorithm:
-    Sorts peak labels by X coordinate, detects horizontal overlaps between nearby labels,
-    and shifts overlapping labels vertically into staggered tiers.
+    Precision Peak Layout Algorithm:
+    - Default: Centered directly above the peak apex (apex_x - tw/2, apex_y - th - 6).
+    - Top Ceiling Clamp: If apex_y < 75 (peak touches top boundary with no space above),
+      place text to the right of apex (apex_x + 8, apex_y + 4).
+    - Horizontal Overlap Resolution: If nearby labels overlap in X, shift overlapping
+      labels upwards into clean tiered rows with leader lines pointing to the apex.
     """
     labels.sort(key=lambda item: item['center'][0])
     
@@ -87,20 +90,29 @@ def resolve_label_collisions(labels, font_main, font_sub, draw, min_dist_y=55):
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
         item['tw'] = tw
         item['th'] = th
-        item['orig_x'] = cx - tw // 2
-        item['orig_y'] = cy - th // 2
-        item['curr_x'] = item['orig_x']
-        item['curr_y'] = item['orig_y']
         item['apex_x'] = cx
         item['apex_y'] = cy
+        
+        # Check if peak apex is near top ceiling (y < 75)
+        if cy < 75:
+            item['orig_x'] = cx + 8
+            item['orig_y'] = max(10, cy + 2)
+            item['is_side_aligned'] = True
+        else:
+            item['orig_x'] = cx - tw // 2
+            item['orig_y'] = max(10, cy - th - 6)
+            item['is_side_aligned'] = False
+            
+        item['curr_x'] = item['orig_x']
+        item['curr_y'] = item['orig_y']
         
     for i in range(len(labels)):
         for j in range(i):
             l1 = labels[j]
             l2 = labels[i]
             
-            b1_x1, b1_x2 = l1['curr_x'] - 10, l1['curr_x'] + l1['tw'] + 10
-            b2_x1, b2_x2 = l2['curr_x'] - 10, l2['curr_x'] + l2['tw'] + 10
+            b1_x1, b1_x2 = l1['curr_x'] - 6, l1['curr_x'] + l1['tw'] + 6
+            b2_x1, b2_x2 = l2['curr_x'] - 6, l2['curr_x'] + l2['tw'] + 6
             
             overlap_x = not (b1_x2 <= b2_x1 or b2_x2 <= b1_x1)
             
@@ -108,69 +120,29 @@ def resolve_label_collisions(labels, font_main, font_sub, draw, min_dist_y=55):
                 dist_y = abs(l1['curr_y'] - l2['curr_y'])
                 if dist_y < min_dist_y:
                     l2['curr_y'] = min(l1['curr_y'], l2['curr_y']) - min_dist_y
+                    l2['is_shifted'] = True
                     
     return labels
 
 def calibrate_and_correct_peaks(peaks):
     """
-    Applies X-axis linear calibration & monotonicity validation to auto-correct OCR digit misreadings.
-    For example:
-    - Missing leading digit: '83.07' at x=1560 (after '154.12') -> auto-corrected to '183.07'
-    - OCR ambiguity: '336.06' vs '335.06' -> auto-corrected based on linear regression.
+    Cleans, deduplicates, and sorts detected peaks by m/z value.
+    Preserves exact AI recognized values without arbitrary arithmetic mutations.
     """
     if not peaks:
         return peaks
 
-    # 1. Sort peaks by X coordinate (left to right)
-    peaks.sort(key=lambda p: p['x_min'])
+    seen = set()
+    cleaned = []
+    for p in peaks:
+        val_str = f"{p['val_num']:.2f}"
+        if val_str not in seen:
+            seen.add(val_str)
+            p['mz'] = val_str
+            cleaned.append(p)
 
-    # 1.5 Single Peak Fallback: If a single peak is far to the right (x_min > 800) but read as < 100 (e.g. '68.08' at x=1500)
-    if len(peaks) == 1 and peaks[0]['val_num'] < 100.0 and peaks[0]['x_min'] > 800:
-        val = peaks[0]['val_num'] + 100.0
-        peaks[0]['val_num'] = val
-        peaks[0]['mz'] = f"{val:.2f}"
-
-    # 2. Monotonicity Pass: If a peak to the right has a smaller m/z than a peak to its left,
-    # check if adding +100, +200, or +300 restores monotonicity.
-    for i in range(len(peaks)):
-        val = peaks[i]['val_num']
-        if i > 0:
-            prev_max = max(p['val_num'] for p in peaks[:i])
-            if val < prev_max:
-                for add in [100.0, 200.0, 300.0]:
-                    if val + add > prev_max:
-                        val += add
-                        peaks[i]['val_num'] = val
-                        peaks[i]['mz'] = f"{val:.2f}"
-                        break
-
-    # 3. Linear Regression Pass: m/z = a * x + b
-    if len(peaks) >= 2:
-        x_pts = np.array([p['x_min'] for p in peaks], dtype=float)
-        mz_pts = np.array([p['val_num'] for p in peaks], dtype=float)
-        try:
-            a, b = np.polyfit(x_pts, mz_pts, 1)
-            for p in peaks:
-                x = p['x_min']
-                val = p['val_num']
-                pred = a * x + b
-                
-                diff = pred - val
-                if diff > 45.0:
-                    add = round(diff / 100.0) * 100.0
-                    if add >= 100.0:
-                        val += add
-                        p['val_num'] = val
-                        p['mz'] = f"{val:.2f}"
-                elif abs(diff) < 3.0:
-                    if abs(val - pred) > 0.6 and abs((val - 1.0) - pred) < 0.3:
-                        val -= 1.0
-                        p['val_num'] = val
-                        p['mz'] = f"{val:.2f}"
-        except Exception:
-            pass
-
-    return peaks
+    cleaned.sort(key=lambda p: p['val_num'])
+    return cleaned
 
 def extract_peaks_from_image(img_bytes, is_precursor=True):
     """
@@ -295,8 +267,8 @@ def _get_dynamic_gemini_models(api_key):
         pass
     return ["gemini-3.6-flash", "gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
-def _get_gemini_raw_peaks(img_bytes):
-    """Calls Google Gemini REST API with dynamic active model discovery and coordinate scaling."""
+def _get_gemini_raw_peaks(img_bytes, is_precursor=True):
+    """Calls Google Gemini REST API with tailored Precursor vs Product smart recommendations."""
     global _last_ai_error
     _last_ai_error = None
     
@@ -314,18 +286,40 @@ def _get_gemini_raw_peaks(img_bytes):
 
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     
-    prompt = f"""
-Examine this LC-MS/MS mass spectrum image (Width: {img_w}px, Height: {img_h}px).
-Identify all numerical m/z peak labels (such as 336.06, 76.99, 183.07, 325.11, etc.) written directly above or near spectral peaks.
-Do not extract axis numbers.
+    if is_precursor:
+        prompt = f"""
+Examine this LC-MS/MS Precursor Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
+This is a Q1 Precursor Scan.
+1. Identify the single main compound Precursor Ion peak (the tallest, most dominant peak on the entire spectrum, e.g. 336.06, 295.04).
+2. Extract all other numerical peak m/z labels printed near peak tops. Do not extract axis numbers.
+3. Mark ONLY the single tallest main precursor peak with "is_recommended": true. Mark all others with "is_recommended": false.
 
 Return ONLY a JSON object:
 {{
   "peaks": [
-    {{"mz": 336.06, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}}
+    {{"mz": 336.06, "is_recommended": true, "height_rank": 1, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}}
   ]
 }}
 """
+    else:
+        prompt = f"""
+Examine this LC-MS/MS Product (Fragment) Ion Spectrum image (Width: {img_w}px, Height: {img_h}px).
+1. Identify all numerical fragment peak m/z labels printed near peak tops (e.g. 283.07, 183.07, 76.99, etc.). Do not extract axis numbers.
+2. Evaluate their spectral peak heights (sensitivities) from tallest (rank 1) to shortest.
+3. Exclude the unfragmented parent precursor ion (the largest m/z peak).
+4. Mark the TOP 3 tallest fragment ion peaks with "is_recommended": true. Mark all other peaks with "is_recommended": false.
+
+Return ONLY a JSON object:
+{{
+  "peaks": [
+    {{"mz": 283.07, "is_recommended": true, "height_rank": 1, "ymin": 150, "xmin": 1200, "xmax": 1300, "ymax": 180}},
+    {{"mz": 128.05, "is_recommended": true, "height_rank": 2, "ymin": 580, "xmin": 450, "xmax": 550, "ymax": 610}},
+    {{"mz": 76.99, "is_recommended": true, "height_rank": 3, "ymin": 1000, "xmin": 200, "xmax": 300, "ymax": 1030}},
+    {{"mz": 51.01, "is_recommended": false, "height_rank": 4, "ymin": 1100, "xmin": 100, "xmax": 180, "ymax": 1130}}
+  ]
+}}
+"""
+
     active_models = _get_dynamic_gemini_models(api_key)
     errors = []
     headers = {"Content-Type": "application/json"}
@@ -371,7 +365,6 @@ Return ONLY a JSON object:
                         xmax_raw = float(p.get("xmax", xmin_raw + 80))
                         ymax_raw = float(p.get("ymax", ymin_raw + 30))
                         
-                        # Convert normalized 0..1000 scale to actual pixel coordinates
                         if xmax_raw <= 1000 and img_w > 1200:
                             xmin = int((xmin_raw / 1000.0) * img_w)
                             xmax = int((xmax_raw / 1000.0) * img_w)
@@ -385,24 +378,11 @@ Return ONLY a JSON object:
                             
                         cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
                         
-                        # Snap to actual blue peak curve apex if detected
-                        if img_cv is not None:
-                            x1 = max(0, cx - 40)
-                            x2 = min(img_w, cx + 40)
-                            sub_b = img_cv[:, x1:x2, 0]
-                            sub_r = img_cv[:, x1:x2, 2]
-                            blue_line = (sub_b > 120) & (sub_b > sub_r + 30)
-                            ys, xs = np.where(blue_line)
-                            if len(ys) > 0:
-                                top_i = np.argmin(ys)
-                                cx = x1 + xs[top_i]
-                                cy = max(40, ys[top_i] - 10)
-                                xmin, xmax = cx - 40, cx + 40
-                                ymin, ymax = cy - 15, cy + 15
-                                
                         raw_peaks.append({
                             'mz': val_str,
                             'val_num': val_num,
+                            'is_recommended': bool(p.get('is_recommended', False)),
+                            'height_rank': int(p.get('height_rank', 999)),
                             'y_min': ymin,
                             'x_min': xmin,
                             'x_max': xmax,
@@ -430,58 +410,25 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     Extracts peak m/z values and accurately ranks them by physical peak height (sensitivity / 감도).
     """
     # 1. Try Google Gemini Flash Vision AI (No billing / credit card required)
-    gemini_raw = _get_gemini_raw_peaks(img_bytes)
+    gemini_raw = _get_gemini_raw_peaks(img_bytes, is_precursor=is_precursor)
     if gemini_raw:
         corrected_peaks = calibrate_and_correct_peaks(gemini_raw)
         
-        # Measure real physical peak height from image for each peak
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_cv is not None:
-            x_axis, y_axis = detect_axis_lines(img_cv)
-            x_start = x_axis + 10
-            x_end = min(img_cv.shape[1] - 30, 2180)
-            
-            all_vals = [p['val_num'] for p in corrected_peaks]
-            if all_vals:
-                min_v, max_v = min(all_vals), max(all_vals)
-                mz_min = 50.0 if min_v >= 45.0 else 0.0
-                mz_max = 500.0 if max_v <= 520.0 else (1000.0 if max_v <= 1020.0 else float(int(np.ceil(max_v / 100.0) * 100.0)))
+        default_checked = set()
+        for p in corrected_peaks:
+            if p.get('is_recommended', False):
+                default_checked.add(p['mz'])
+                
+        # Fallback if no recommended flags returned by AI:
+        if not default_checked and corrected_peaks:
+            if is_precursor:
+                peaks_by_rank = sorted(corrected_peaks, key=lambda p: p.get('height_rank', 999))
+                default_checked = set(p['mz'] for p in peaks_by_rank[:1])
             else:
-                mz_min, mz_max = 50.0, 500.0
-                
-            # Pure dark blue spectrum line mask
-            blue_line = (img_cv[:, :, 0] > 130) & (img_cv[:, :, 2] < 70) & (img_cv[:, :, 1] < 120)
-            
-            for p in corrected_peaks:
-                val_f = p['val_num']
-                x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
-                x1 = max(x_start, x_calc - 15)
-                x2 = min(x_end, x_calc + 15)
-                sub = blue_line[70:y_axis-10, x1:x2]
-                ys, xs = np.where(sub)
-                if len(ys) > 0:
-                    top_y = 70 + int(np.min(ys))
-                    p['height'] = int(y_axis - top_y)
-                    p['y_min'] = top_y
-                else:
-                    p['height'] = 0
-                    p['y_min'] = y_axis
-        else:
-            for p in corrected_peaks:
-                p['height'] = 0
-                
-        if is_precursor:
-            peaks_by_height = sorted(corrected_peaks, key=lambda p: p.get('height', 0), reverse=True)
-            default_checked = set(p['mz'] for p in peaks_by_height[:1])
-        else:
-            # Product Ion: Exclude largest m/z (residual precursor ion) from top 3 recommendations
-            max_mz = max((p['val_num'] for p in corrected_peaks), default=0)
-            candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5]
-            if not candidates:
-                candidates = corrected_peaks
-            peaks_by_height = sorted(candidates, key=lambda p: p.get('height', 0), reverse=True)
-            default_checked = set(p['mz'] for p in peaks_by_height[:3])
+                max_mz = max((p['val_num'] for p in corrected_peaks), default=0)
+                candidates = [p for p in corrected_peaks if p['val_num'] < max_mz - 0.5] or corrected_peaks
+                peaks_by_rank = sorted(candidates, key=lambda p: p.get('height_rank', 999))
+                default_checked = set(p['mz'] for p in peaks_by_rank[:3])
             
         all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
         return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Gemini Flash AI ⚡ (99.99%)'}
@@ -589,7 +536,9 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     if all_vals:
         min_v, max_v = min(all_vals), max(all_vals)
         mz_min = 50.0 if min_v >= 45.0 else 0.0
-        if max_v <= 520.0:
+        if max_v <= 220.0:
+            mz_max = 200.0
+        elif max_v <= 520.0:
             mz_max = 500.0
         elif max_v <= 1020.0:
             mz_max = 1000.0
@@ -610,11 +559,11 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
                 continue
                 
             x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
-            x_calc = max(x_start + 20, min(x_end - 20, x_calc))
+            x_calc = max(x_start + 15, min(x_end - 15, x_calc))
             
-            # Scan vertical blue line apex
-            x1 = max(x_start, x_calc - 25)
-            x2 = min(x_end, x_calc + 25)
+            # Scan vertical blue line apex in a +/-50px window around x_calc
+            x1 = max(x_start, x_calc - 50)
+            x2 = min(x_end, x_calc + 50)
             sub_blue = is_blue[70:y_bottom, x1:x2]
             ys, xs = np.where(sub_blue)
             if len(ys) > 0:
@@ -652,7 +601,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     font_main = get_render_font(font_size, bold=True)
     font_sub = get_render_font(max(12, font_size - 5), bold=False)
         
-    labels = resolve_label_collisions(peak_labels, font_main, font_sub, draw, min_dist_y=int(font_size * 1.25))
+    labels = resolve_label_collisions(peak_labels, font_main, font_sub, draw, min_dist_y=int(font_size * 1.2))
     
     for item in labels:
         txt = item['text']
@@ -660,13 +609,18 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
         tw, th = item['tw'], item['th']
         apex_x, apex_y = item['apex_x'], item['apex_y']
         is_mrm = item.get('is_mrm', False)
+        is_side = item.get('is_side_aligned', False)
+        is_shifted = item.get('is_shifted', False) or abs(ty - item['orig_y']) > 15
         
         text_color = (0, 0, 220, 255) if is_mrm else (120, 120, 120, 255)
         line_color = (0, 0, 220, 255) if is_mrm else (150, 150, 150, 255)
         font = font_main if is_mrm else font_sub
         
-        dy = abs(ty - item['orig_y'])
-        if dy > 15:
+        if is_side:
+            # Side aligned (ceiling clamp): small pointer dot at apex
+            draw.ellipse([apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3], fill=line_color)
+        elif is_shifted:
+            # Shifted vertically due to overlap: draw crisp leader line from text bottom to apex
             start_pt = (tx + tw // 2, ty + th + 2)
             end_pt = (apex_x, apex_y)
             draw.line([start_pt, end_pt], fill=line_color, width=2)
