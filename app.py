@@ -97,7 +97,7 @@ uploaded_file = st.file_uploader("📂 분석할 MS/MS 엑셀 파일 (.xlsx, .xl
 if uploaded_file is not None:
     st.success(f"📄 파일 업로드 완료: **{uploaded_file.name}**")
 
-    # ── 임시 파일 관리: 이전 파일 삭제 후 새로 생성 ─────────────────────────
+    # ── 임시 파일 관리 ───────────────────────────────────────────────────────
     prev_tmp = st.session_state.get("tmp_excel_path")
     if prev_tmp and os.path.exists(prev_tmp):
         try:
@@ -118,8 +118,8 @@ if uploaded_file is not None:
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             sheet_data[sheet_name] = {
-                'precursor': {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'meta': {}},
-                'product':   {'all_peaks': [], 'default_checked': set(), 'axis_ticks': [], 'meta': {}}
+                'precursor': {'all_peaks': [], 'default_checked': set(), 'coords_map': {}},
+                'product':   {'all_peaks': [], 'default_checked': set(), 'coords_map': {}}
             }
 
             for idx, img in enumerate(ws._images):
@@ -129,14 +129,7 @@ if uploaded_file is not None:
 
                 sheet_data[sheet_name][cat_key]['all_peaks'].extend(peak_info['all_peaks'])
                 sheet_data[sheet_name][cat_key]['default_checked'].update(peak_info['default_checked'])
-
-                if peak_info.get('axis_ticks'):
-                    sheet_data[sheet_name][cat_key]['axis_ticks'] = peak_info['axis_ticks']
-                
-                sheet_data[sheet_name][cat_key]['meta'] = {
-                    'x_axis_min': peak_info.get('x_axis_min'),
-                    'x_axis_max': peak_info.get('x_axis_max')
-                }
+                sheet_data[sheet_name][cat_key]['coords_map'].update(peak_info.get('coords_map', {}))
 
             for cat in ('precursor', 'product'):
                 sheet_data[sheet_name][cat]['all_peaks'] = sorted(
@@ -183,18 +176,9 @@ if uploaded_file is not None:
 
         st.markdown(label)
 
-        ticks = peak_info.get('axis_ticks', [])
-        meta = peak_info.get('meta', {})
-        if meta.get('x_axis_min') and meta.get('x_axis_max'):
-            st.caption(f"📐 X축 분석 범위: {meta['x_axis_min']} ~ {meta['x_axis_max']} Da")
-        elif ticks:
-            tick_str = ", ".join(f"{t['mz']} Da→{t['pixel_x']}px" for t in ticks[:3])
-            st.caption(f"📐 X축 보정 눈금: {tick_str}")
-        else:
-            st.caption("⚠️ X축 보정 정보 수신 대기 중")
-
-        peaks    = peak_info['all_peaks']
-        defaults = peak_info['default_checked']
+        peaks      = peak_info['all_peaks']
+        defaults   = peak_info['default_checked']
+        coords_map = peak_info.get('coords_map', {})
 
         if not peaks:
             st.info("검출된 피크가 없습니다.")
@@ -227,14 +211,23 @@ if uploaded_file is not None:
             key=f"editor_{ion_type}_{sheet_name}"
         )
 
-        return [
-            {
-                'orig_mz':  row['분자량(m/z)'],
-                'final_mz': str(row['분자량(m/z)']).strip(),
-                'is_mrm':   bool(row['MRM 선택'])
-            }
-            for _, row in edited.iterrows()
-        ]
+        results = []
+        for idx, row in edited.iterrows():
+            orig_mz = peaks[idx] if idx < len(peaks) else str(row['분자량(m/z)']).strip()
+            final_mz = str(row['분자량(m/z)']).strip()
+            is_mrm = bool(row['MRM 선택'])
+
+            # 원래 인식된 픽셀 좌표 가져오기
+            coord = coords_map.get(orig_mz, {})
+            results.append({
+                'orig_mz':  orig_mz,
+                'final_mz': final_mz,
+                'is_mrm':   is_mrm,
+                'cx':       coord.get('cx'),
+                'cy':       coord.get('cy')
+            })
+
+        return results
     # ─────────────────────────────────────────────────────────────────────────
 
     sheet_names = list(sheet_peak_data.keys())
@@ -257,15 +250,7 @@ if uploaded_file is not None:
 
             sheet_selections[sheet_name] = {
                 'precursor': prec_selections,
-                'product':   prod_selections,
-                'axis_ticks': {
-                    'precursor': sheet_peak_data[sheet_name]['precursor'].get('axis_ticks', []),
-                    'product':   sheet_peak_data[sheet_name]['product'].get('axis_ticks', []),
-                },
-                'meta': {
-                    'precursor': sheet_peak_data[sheet_name]['precursor'].get('meta', {}),
-                    'product':   sheet_peak_data[sheet_name]['product'].get('meta', {}),
-                }
+                'product':   prod_selections
             }
 
     st.markdown("---")
