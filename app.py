@@ -28,15 +28,37 @@ st.set_page_config(
 )
 
 # Check Streamlit Secrets & GCP Key Status
-try:
-    if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
-        gcp_dict = dict(st.secrets["gcp_service_account"])
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"] = json.dumps(gcp_dict)
-except Exception:
-    pass
+def load_gcp_creds_from_secrets():
+    if not hasattr(st, "secrets"):
+        return None
+    try:
+        if "gcp_service_account" in st.secrets:
+            val = st.secrets["gcp_service_account"]
+            if hasattr(val, "to_dict"):
+                return val.to_dict()
+            elif isinstance(val, dict):
+                return dict(val)
+            elif isinstance(val, str):
+                return json.loads(val)
+        for k in ["gcp_service_account_json", "gcp_json", "gcp_key", "GOOGLE_APPLICATION_CREDENTIALS_JSON"]:
+            if k in st.secrets:
+                val = st.secrets[k]
+                if hasattr(val, "to_dict"):
+                    return val.to_dict()
+                elif isinstance(val, dict):
+                    return dict(val)
+                elif isinstance(val, str):
+                    return json.loads(val)
+    except Exception:
+        pass
+    return None
+
+gcp_creds_dict = load_gcp_creds_from_secrets()
+if gcp_creds_dict:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"] = json.dumps(gcp_creds_dict)
 
 gcp_key_path = auto_load_gcp_credentials()
-has_gcp_key = (gcp_key_path is not None) or ("GOOGLE_APPLICATION_CREDENTIALS" in os.environ) or ("GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ)
+has_gcp_key = (gcp_creds_dict is not None) or (gcp_key_path is not None) or ("GOOGLE_APPLICATION_CREDENTIALS" in os.environ)
 
 # Custom CSS styling for polished UI
 st.markdown("""

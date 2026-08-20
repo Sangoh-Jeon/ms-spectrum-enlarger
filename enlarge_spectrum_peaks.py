@@ -328,6 +328,22 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
     Extracts peak m/z values using Google Lens / Google Cloud Vision AI engine (99.99% accuracy in ~0.05s).
     Supports Streamlit Cloud Secrets, GCP Service Account JSON, or Local Calibrated OCR Fallback.
     """
+    # 0. Direct Streamlit Secrets check (for 1-click Streamlit Cloud deployment)
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+            from google.cloud import vision
+            from google.oauth2 import service_account
+            info = dict(st.secrets["gcp_service_account"])
+            creds = service_account.Credentials.from_service_account_info(info)
+            client = vision.ImageAnnotatorClient(credentials=creds)
+            image = vision.Image(content=img_bytes)
+            response = client.text_detection(image=image)
+            parsed = _parse_gcp_vision_response(response, is_precursor)
+            if parsed: return parsed
+    except Exception as e:
+        pass
+
     # 1. Streamlit Secrets or Environment JSON String
     if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
         try:
