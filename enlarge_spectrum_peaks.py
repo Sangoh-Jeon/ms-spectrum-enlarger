@@ -264,8 +264,31 @@ def get_last_ai_error():
     global _last_ai_error
     return _last_ai_error
 
+
+def _get_dynamic_gemini_models(api_key):
+    """Dynamically queries Google API to get the exact list of active supported models for this key."""
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            supported = []
+            for m in data.get("models", []):
+                name = m.get("name", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    clean_name = name.replace("models/", "")
+                    supported.append(clean_name)
+            if supported:
+                flash_models = [m for m in supported if "flash" in m.lower()]
+                other_models = [m for m in supported if "flash" not in m.lower()]
+                return flash_models + other_models
+    except Exception:
+        pass
+    return ["gemini-3.6-flash", "gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
 def _get_gemini_raw_peaks(img_bytes):
-    """Calls Google Gemini REST API with base64 image."""
+    """Calls Google Gemini REST API with dynamic active model discovery."""
     global _last_ai_error
     _last_ai_error = None
     
@@ -288,18 +311,12 @@ Return ONLY a JSON object:
   ]
 }
 """
-    models = [
-        ("v1beta", "gemini-2.5-flash"),
-        ("v1beta", "gemini-2.0-flash"),
-        ("v1beta", "gemini-1.5-flash"),
-        ("v1", "gemini-1.5-flash"),
-    ]
-    
+    active_models = _get_dynamic_gemini_models(api_key)
     errors = []
     headers = {"Content-Type": "application/json"}
     
-    for api_ver, model_name in models:
-        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
+    for model_name in active_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = {
             "contents": [{
                 "role": "user",
@@ -351,6 +368,7 @@ Return ONLY a JSON object:
                     except Exception:
                         pass
                 if raw_peaks:
+                    _last_ai_error = None
                     return raw_peaks
             else:
                 errors.append(f"[{model_name}] HTTP {resp.status_code}: {resp.text}")
@@ -358,7 +376,7 @@ Return ONLY a JSON object:
             errors.append(f"[{model_name}] 오류: {e}")
             
     if errors:
-        _last_ai_error = " | ".join(errors)
+        _last_ai_error = errors[0] if len(errors) == 1 else " | ".join(errors[:2])
         
     return []
 
