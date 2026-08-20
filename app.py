@@ -147,6 +147,8 @@ if uploaded_file is not None:
         with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
             st.session_state["sheet_peak_data"] = analyze_excel_peaks(uploaded_file.getvalue())
             st.session_state["current_file_id"] = file_id
+            if "generated_file" in st.session_state:
+                del st.session_state["generated_file"]
 
     sheet_peak_data = st.session_state.get("sheet_peak_data", {})
 
@@ -163,6 +165,8 @@ if uploaded_file is not None:
                 del st.session_state["current_file_id"]
             if "sheet_peak_data" in st.session_state:
                 del st.session_state["sheet_peak_data"]
+            if "generated_file" in st.session_state:
+                del st.session_state["generated_file"]
             st.rerun()
 
     st.caption("✓ OCR 오인식이 있다면 입력창에서 수기로 직접 변경할 수 있습니다. (Precursor 상위 1개, Product 상위 3개 자동 체크)")
@@ -287,31 +291,58 @@ if uploaded_file is not None:
                 orig_name, ext = os.path.splitext(uploaded_file.name)
                 download_filename = f"{orig_name}_확대{ext}"
                 
-                # 1회 자동 브라우저 다운로드 실행 (JavaScript Trigger)
-                b64_file = base64.b64encode(result_bytes).decode('utf-8')
-                auto_dl_js = f"""
-                <script>
-                    var a = document.createElement('a');
-                    a.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_file}';
-                    a.download = '{download_filename}';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                </script>
-                """
-                st.components.v1.html(auto_dl_js, height=0)
-                
+                st.session_state["generated_file"] = {
+                    "bytes": result_bytes,
+                    "filename": download_filename,
+                    "auto_download": True
+                }
                 st.balloons()
-                st.success(f"🎉 **{download_filename}** 생성이 완료되어 브라우저에서 **자동 다운로드**되었습니다!")
-                st.download_button(
-                    label=f"📥 {download_filename} 다시 다운로드",
-                    data=result_bytes,
-                    file_name=download_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+                st.rerun()
             except Exception as e:
                 st.error(f"❌ 엑셀 처리 중 오류 발생: {str(e)}")
+
+    # Persistent Download Section (Never disappears upon clicking download)
+    if "generated_file" in st.session_state:
+        gen_info = st.session_state["generated_file"]
+        res_bytes = gen_info["bytes"]
+        dl_filename = gen_info["filename"]
+        
+        if gen_info.get("auto_download", False):
+            gen_info["auto_download"] = False
+            b64_file = base64.b64encode(res_bytes).decode('utf-8')
+            auto_dl_js = f"""
+            <script>
+                (function() {{
+                    try {{
+                        var doc = (window.parent && window.parent.document) ? window.parent.document : document;
+                        var a = doc.createElement('a');
+                        a.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_file}';
+                        a.download = '{dl_filename}';
+                        doc.body.appendChild(a);
+                        a.click();
+                        doc.body.removeChild(a);
+                    }} catch(e) {{
+                        var a2 = document.createElement('a');
+                        a2.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_file}';
+                        a2.download = '{dl_filename}';
+                        document.body.appendChild(a2);
+                        a2.click();
+                        document.body.removeChild(a2);
+                    }}
+                }})();
+            </script>
+            """
+            st.components.v1.html(auto_dl_js, height=0)
+        
+        st.success(f"🎉 **{dl_filename}** 생성이 완료되었습니다!")
+        st.download_button(
+            label=f"📥 {dl_filename} 다운로드",
+            data=res_bytes,
+            file_name=dl_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="persistent_download_button"
+        )
 
 else:
     st.info("👆 상단에서 분석할 MS/MS 엑셀 파일(.xlsx)을 업로드해 주세요.")

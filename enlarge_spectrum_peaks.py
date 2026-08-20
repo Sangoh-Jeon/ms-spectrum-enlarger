@@ -516,6 +516,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     # 1. 100% COMPLETE ERASURE of old small text & leader lines in graph area
     out_img = img.copy()
     b, g, r = cv2.split(out_img)
+    pure_blue = (b > 130) & (r < 70) & (g < 120)
     is_blue = (b > 110) & (b > r + 25) & (b > g + 5)
     gray = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
     
@@ -561,23 +562,25 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
             x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
             x_calc = max(x_start + 15, min(x_end - 15, x_calc))
             
-            # Scan vertical blue line apex in a +/-50px window around x_calc
-            x1 = max(x_start, x_calc - 50)
-            x2 = min(x_end, x_calc + 50)
-            sub_blue = is_blue[70:y_bottom, x1:x2]
-            ys, xs = np.where(sub_blue)
-            if len(ys) > 0:
-                top_i = np.argmin(ys)
-                cx = x1 + xs[top_i]
-                cy = max(40, 70 + ys[top_i] - 10)
-            else:
-                cx = x_calc
-                cy = int(img.shape[0] * 0.45)
-                
+            # Scan true peak apex from baseline upwards (ignoring y < 80 top grid)
+            x1 = max(x_start, x_calc - 45)
+            x2 = min(x_end, x_calc + 45)
+            best_apex_x = x_calc
+            best_apex_y = y_bottom
+            
+            for cx in range(x1, x2):
+                col = pure_blue[80:y_bottom, cx]
+                blue_idx = np.where(col)[0]
+                if len(blue_idx) > 0:
+                    top_y = 80 + np.min(blue_idx)
+                    if top_y < best_apex_y:
+                        best_apex_y = top_y
+                        best_apex_x = cx
+                        
             peak_labels.append({
                 'text': final_mz,
-                'center': (cx, cy),
-                'bbox': (cx - 40, cy - 15, cx + 40, cy + 15),
+                'center': (best_apex_x, best_apex_y),
+                'bbox': (best_apex_x - 40, best_apex_y - 15, best_apex_x + 40, best_apex_y + 15),
                 'is_mrm': is_mrm
             })
     else:
