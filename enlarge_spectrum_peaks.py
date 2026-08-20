@@ -288,12 +288,21 @@ Return ONLY a JSON object:
   ]
 }
 """
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    models = [
+        ("v1beta", "gemini-2.5-flash"),
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1beta", "gemini-1.5-flash"),
+        ("v1", "gemini-1.5-flash"),
+    ]
     
-    for model_name in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    errors = []
+    headers = {"Content-Type": "application/json"}
+    
+    for api_ver, model_name in models:
+        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
         payload = {
             "contents": [{
+                "role": "user",
                 "parts": [
                     {"text": prompt},
                     {
@@ -310,7 +319,7 @@ Return ONLY a JSON object:
         }
         
         try:
-            resp = requests.post(url, json=payload, timeout=25)
+            resp = requests.post(url, headers=headers, json=payload, timeout=25)
             if resp.status_code == 200:
                 res_data = resp.json()
                 text = res_data["candidates"][0]["content"]["parts"][0]["text"]
@@ -344,10 +353,13 @@ Return ONLY a JSON object:
                 if raw_peaks:
                     return raw_peaks
             else:
-                _last_ai_error = f"Gemini HTTP {resp.status_code}: {resp.text}"
+                errors.append(f"[{model_name}] HTTP {resp.status_code}: {resp.text}")
         except Exception as e:
-            _last_ai_error = f"Gemini 통신 오류: {e}"
+            errors.append(f"[{model_name}] 오류: {e}")
             
+    if errors:
+        _last_ai_error = " | ".join(errors)
+        
     return []
 
 def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
