@@ -113,8 +113,7 @@ if uploaded_file is not None:
         tmp_file.write(uploaded_file.getvalue())
         tmp_excel_path = tmp_file.name
 
-    # Cache peak extraction per uploaded file
-    @st.cache_data(show_spinner=False)
+    # Analyze Excel spectrum images freshly
     def analyze_excel_peaks(file_bytes):
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
         sheet_data = {}
@@ -139,7 +138,7 @@ if uploaded_file is not None:
             
         return sheet_data
 
-    with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 초고속 분석 중입니다..."):
+    with st.spinner("🔍 엑셀 내 모든 시트의 MS/MS 이온 피크를 Google Gemini AI로 분석 중입니다..."):
         sheet_peak_data = analyze_excel_peaks(uploaded_file.getvalue())
 
     st.subheader("🎯 MRM 조건 이온 선택 및 분자량(m/z) 수기 수정")

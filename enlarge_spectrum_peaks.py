@@ -272,12 +272,11 @@ def _get_gemini_raw_peaks(img_bytes):
             
         pil_img = Image.open(io.BytesIO(img_bytes))
         prompt = """
-You are an expert analytical chemist and mass spectrometry data processor.
-Analyze this LC-MS/MS mass spectrum image.
-Extract all the numerical peak m/z values (e.g. 336.06, 76.99, 183.07, 325.11, etc.) written directly above the spectral peaks in the graph area.
-Do NOT extract axis labels (like 0, 50, 100, 200, 400 on the bottom x-axis, or 0%..100% on the left y-axis).
+Examine this LC-MS/MS mass spectrum image.
+Identify and extract all the numerical peak m/z values (numbers with decimals such as 336.06, 76.99, 183.07, 325.11, etc. written above or near spectral peaks).
+Do not extract axis numbers.
 
-Return strict JSON format:
+Return ONLY a JSON object:
 {
   "peaks": [
     {"mz": 336.06, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}
@@ -286,7 +285,8 @@ Return strict JSON format:
 """
         resp = model.generate_content([prompt, pil_img])
         text = resp.text.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        cleaned = text.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{[\s\S]*\}', cleaned)
         if match:
             data = json.loads(match.group(0))
             raw_peaks = []
