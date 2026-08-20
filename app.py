@@ -70,7 +70,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">🧪 GLP 보고서용 질량분석(MS/MS) 피크 분자량(m/z) 글자 확대 웹 프로그램</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Analyst 등 질량분석 장비 엑셀 데이터를 올려주시면, MRM 선택 이온은 <b>파란색 45pt</b>, 기타 이온은 <b>회색 40pt</b>로 선명하게 확대한 엑셀 파일을 자동 생성합니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Analyst 등 질량분석 장비 엑셀 데이터를 올려주시면, MRM 선택 이온은 <b>파란색 45pt</b>, 기타 이온은 <b>회색 35pt</b>로 선명하게 확대한 엑셀 파일을 자동 생성합니다.</div>', unsafe_allow_html=True)
 
 # Sidebar
 st.sidebar.header("⚙️ 엔진 & 확대 옵션 설정")
@@ -89,7 +89,7 @@ else:
     st.sidebar.warning("⚠️ **Gemini API 키를 입력해 주세요** (Secrets 또는 위 입력창)")
 
 font_size = st.sidebar.slider("MRM 강조 폰트 크기 (pt)", min_value=20, max_value=72, value=45, step=1)
-st.sidebar.info(f"✓ 선택 이온: 파란색 {font_size}pt 강조\n✓ 기타 이온: 회색 {max(12, font_size - 5)}pt 표시")
+st.sidebar.info(f"✓ 선택 이온: 파란색 {font_size}pt 강조\n✓ 기타 이온: 회색 35pt 표시")
 
 # File Upload
 uploaded_file = st.file_uploader("📂 분석할 MS/MS 엑셀 파일 (.xlsx, .xls)을 올려주세요", type=["xlsx", "xls"])
@@ -264,7 +264,7 @@ if uploaded_file is not None:
     st.markdown("---")
 
     if st.button("🚀 MRM 이온 확대 적용 및 엑셀 파일 생성", use_container_width=True):
-        with st.spinner(f"✨ 선택한 MRM 조건(파란색 {font_size}pt / 회색 {max(12, font_size - 5)}pt)으로 스펙트럼 변환 및 엑셀 생성 중입니다..."):
+        with st.spinner(f"✨ 선택한 MRM 조건(파란색 {font_size}pt / 회색 35pt)으로 스펙트럼 변환 및 엑셀 생성 중입니다..."):
             try:
                 output_excel_path = process_excel_with_selections(
                     tmp_excel_path,

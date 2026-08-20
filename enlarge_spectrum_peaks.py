@@ -493,7 +493,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     draw = ImageDraw.Draw(overlay)
 
     font_main = get_render_font(font_size, bold=True)
-    font_sub = get_render_font(max(12, font_size - 5), bold=False)
+    font_sub  = get_render_font(35, bold=False)  # 기타 이온: 회색 35pt 고정
 
     # 2D 계단식 겹침 방지 알고리즘 실행
     labels = resolve_label_collisions_cascading(
