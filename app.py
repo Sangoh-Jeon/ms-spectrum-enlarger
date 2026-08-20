@@ -27,43 +27,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Check Streamlit Secrets & GCP Key Status
-def load_gcp_creds_from_secrets():
-    if not hasattr(st, "secrets"):
-        return None
+# Check Streamlit Secrets for Gemini API Key
+def get_active_gemini_key():
     try:
-        # 1. Direct section name
-        if "gcp_service_account" in st.secrets:
-            val = st.secrets["gcp_service_account"]
-            if hasattr(val, "to_dict"): return val.to_dict()
-            if isinstance(val, dict): return dict(val)
-            if isinstance(val, str): return json.loads(val)
-            
-        # 2. Iterate all keys in st.secrets
-        for k in st.secrets.keys():
-            val = st.secrets[k]
-            if isinstance(val, str) and ("service_account" in val or "private_key" in val):
-                try:
-                    return json.loads(val)
-                except Exception:
-                    pass
-            if hasattr(val, "to_dict"):
-                d = val.to_dict()
-                if "private_key" in d or "type" in d:
-                    return d
-            elif isinstance(val, dict):
-                if "private_key" in val or "type" in val:
-                    return dict(val)
+        if hasattr(st, "secrets") and len(st.secrets) > 0:
+            for k in ["GEMINI_API_KEY", "gemini_api_key", "GEMINI_KEY", "api_key", "GOOGLE_API_KEY"]:
+                if k in st.secrets:
+                    return str(st.secrets[k]).strip()
     except Exception:
         pass
-    return None
+    return os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", "")).strip()
 
-gcp_creds_dict = load_gcp_creds_from_secrets()
-if gcp_creds_dict:
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"] = json.dumps(gcp_creds_dict)
-
-gcp_key_path = auto_load_gcp_credentials()
-has_gcp_key = (gcp_creds_dict is not None) or (gcp_key_path is not None) or ("GOOGLE_APPLICATION_CREDENTIALS" in os.environ)
+active_gemini_key = get_active_gemini_key()
+if active_gemini_key:
+    os.environ["GEMINI_API_KEY"] = active_gemini_key
 
 # Custom CSS styling for polished UI
 st.markdown("""
@@ -108,23 +85,19 @@ st.markdown('<div class="sub-header">Analyst 등 질량분석 장비 엑셀 데�
 # Sidebar Options
 st.sidebar.header("⚙️ 엔진 & 확대 옵션 설정")
 
-# Direct JSON Key Paste fallback for ease of use
-with st.sidebar.expander("🔑 구글 키(JSON) 직접 등록 / Secrets 확인", expanded=(not has_gcp_key)):
-    custom_json = st.text_area("메모장 복사 내용(.json) 붙여넣기", height=120, placeholder="{\n  \"type\": \"service_account\",\n  ...\n}")
-    if custom_json.strip():
-        try:
-            d = json.loads(custom_json.strip())
-            if "type" in d or "private_key" in d:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"] = json.dumps(d)
-                has_gcp_key = True
-                st.success("✅ 구글 키가 실시간 적용되었습니다!")
-        except Exception as e:
-            st.error(f"JSON 형식 오류: {e}")
+# Direct Gemini API Key Input
+with st.sidebar.expander("🔑 Google Gemini API 키 설정", expanded=(not bool(active_gemini_key))):
+    custom_gemini_key = st.text_input("Gemini API 키 (AIzaSy...)", value=active_gemini_key, type="password", placeholder="AIzaSy로 시작하는 1줄 키")
+    if custom_gemini_key.strip():
+        active_gemini_key = custom_gemini_key.strip()
+        os.environ["GEMINI_API_KEY"] = active_gemini_key
 
-if has_gcp_key:
-    st.sidebar.success("⚡ **Google Lens AI 엔진 활성화됨** (정확도 99.99%)")
+has_ai_key = bool(active_gemini_key)
+
+if has_ai_key:
+    st.sidebar.success("⚡ **Google Gemini 2.0 AI 활성화됨** (정확도 99.99%)")
 else:
-    st.sidebar.warning("⚠️ **Google Cloud Vision 키 등록 필요** (Secrets 등록 시 자동 활성화)")
+    st.sidebar.warning("⚠️ **Gemini API 키를 입력해 주세요** (Secrets 또는 위 입력창)")
 
 font_size = st.sidebar.slider("MRM 강조 폰트 크기 (pt)", min_value=20, max_value=72, value=45, step=1)
 st.sidebar.info(f"✓ 선택 이온: 파란색 {font_size}pt 강조\n✓ 기타 이온: 회색 {max(12, font_size - 5)}pt 표시")

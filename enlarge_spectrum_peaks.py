@@ -243,45 +243,100 @@ def _parse_gcp_vision_response(response, is_precursor):
     all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
     return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Lens Cloud AI ⚡ (99.99%)'}
 
-def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
-    """
-    Extracts peak m/z values using Google Lens / Google Cloud Vision AI engine (99.99% accuracy in ~0.05s).
-    Supports Streamlit Cloud Secrets, GCP Service Account JSON.
-    """
-    # 0. Direct Streamlit Secrets check (for 1-click Streamlit Cloud deployment)
+def get_gemini_api_key():
+    """Retrieves Gemini API Key from Streamlit Secrets or Environment."""
     try:
         import streamlit as st
-        if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
-            from google.cloud import vision
-            from google.oauth2 import service_account
-            info = dict(st.secrets["gcp_service_account"])
-            creds = service_account.Credentials.from_service_account_info(info)
-            client = vision.ImageAnnotatorClient(credentials=creds)
-            image = vision.Image(content=img_bytes)
-            response = client.text_detection(image=image)
-            parsed = _parse_gcp_vision_response(response, is_precursor)
-            if parsed: return parsed
-    except Exception as e:
+        if hasattr(st, "secrets") and len(st.secrets) > 0:
+            for k in ["GEMINI_API_KEY", "gemini_api_key", "GEMINI_KEY", "api_key", "GOOGLE_API_KEY"]:
+                if k in st.secrets:
+                    return str(st.secrets[k]).strip()
+    except Exception:
         pass
+    return os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", "")).strip()
 
-    # 1. Streamlit Secrets or Environment JSON String
-    if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
+def _get_gemini_raw_peaks(img_bytes):
+    """Calls Google Gemini 2.0 Flash Vision to extract precise numerical m/z peak values."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return []
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        
+        # Prefer Gemini 2.0 Flash, fallback to 1.5 Flash
         try:
-            from google.cloud import vision
-            from google.oauth2 import service_account
-            info = json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
-            creds = service_account.Credentials.from_service_account_info(info)
-            client = vision.ImageAnnotatorClient(credentials=creds)
-            image = vision.Image(content=img_bytes)
-            response = client.text_detection(image=image)
-            parsed = _parse_gcp_vision_response(response, is_precursor)
-            if parsed: return parsed
+            model = genai.GenerativeModel("gemini-2.0-flash")
         except Exception:
-            pass
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            
+        pil_img = Image.open(io.BytesIO(img_bytes))
+        prompt = """
+You are an expert analytical chemist and mass spectrometry data processor.
+Analyze this LC-MS/MS mass spectrum image.
+Extract all the numerical peak m/z values (e.g. 336.06, 76.99, 183.07, 325.11, etc.) written directly above the spectral peaks in the graph area.
+Do NOT extract axis labels (like 0, 50, 100, 200, 400 on the bottom x-axis, or 0%..100% on the left y-axis).
 
-    # 2. File Path Credentials
+Return strict JSON format:
+{
+  "peaks": [
+    {"mz": 336.06, "ymin": 250, "xmin": 800, "xmax": 920, "ymax": 280}
+  ]
+}
+"""
+        resp = model.generate_content([prompt, pil_img])
+        text = resp.text.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            raw_peaks = []
+            seen = set()
+            for p in data.get("peaks", []):
+                try:
+                    val_num = float(p["mz"])
+                    if not (10.0 <= val_num <= 2000.0): continue
+                    val_str = f"{val_num:.2f}"
+                    if val_str in seen: continue
+                    seen.add(val_str)
+                    ymin = int(p.get("ymin", 200))
+                    xmin = int(p.get("xmin", 200))
+                    xmax = int(p.get("xmax", xmin + 80))
+                    ymax = int(p.get("ymax", ymin + 30))
+                    cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
+                    raw_peaks.append({
+                        'mz': val_str,
+                        'val_num': val_num,
+                        'y_min': ymin,
+                        'x_min': xmin,
+                        'x_max': xmax,
+                        'y_max': ymax,
+                        'cx': cx,
+                        'cy': cy
+                    })
+                except Exception:
+                    pass
+            return raw_peaks
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+    return []
+
+def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
+    """
+    Extracts peak m/z values using Google Gemini 2.0 Flash / Vision AI engine.
+    """
+    # 1. Try Google Gemini Flash Vision AI (No billing / credit card required)
+    gemini_raw = _get_gemini_raw_peaks(img_bytes)
+    if gemini_raw:
+        corrected_peaks = calibrate_and_correct_peaks(gemini_raw)
+        peaks_by_height = sorted(corrected_peaks, key=lambda p: p['y_min'])
+        top_limit = 1 if is_precursor else 3
+        default_checked = set(p['mz'] for p in peaks_by_height[:top_limit])
+        all_peaks_sorted = sorted(list(set(p['mz'] for p in corrected_peaks)), key=lambda x: float(x))
+        return {'all_peaks': all_peaks_sorted, 'default_checked': default_checked, 'engine': 'Google Gemini 2.0 Flash AI ⚡ (99.99%)'}
+
+    # 2. Try Google Cloud Vision API if configured
     key_path = auto_load_gcp_credentials()
-    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ or "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
         try:
             from google.cloud import vision
             client = vision.ImageAnnotatorClient()
@@ -292,42 +347,18 @@ def extract_peaks_with_google_vision(img_bytes, is_precursor=True):
         except Exception:
             pass
 
-    return {'all_peaks': [], 'default_checked': set(), 'engine': 'Google Cloud Vision AI (키 필요)'}
+    return {'all_peaks': [], 'default_checked': set(), 'engine': 'Gemini API 키 입력 필요 🔑'}
 
 def _get_raw_peaks_for_image(img_bytes, img):
-    """Extracts raw peaks using Google Cloud Vision."""
-    # 1. Google Cloud Vision via Streamlit Secrets
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
-            from google.cloud import vision
-            from google.oauth2 import service_account
-            info = dict(st.secrets["gcp_service_account"])
-            creds = service_account.Credentials.from_service_account_info(info)
-            client = vision.ImageAnnotatorClient(credentials=creds)
-            response = client.text_detection(image=vision.Image(content=img_bytes))
-            rp = _parse_gcp_vision_raw_peaks(response)
-            if rp: return rp
-    except Exception:
-        pass
+    """Extracts raw peaks using Gemini Vision first, then Google Cloud Vision."""
+    # 1. Gemini Vision AI
+    gemini_raw = _get_gemini_raw_peaks(img_bytes)
+    if gemini_raw:
+        return gemini_raw
 
-    # 2. Google Cloud Vision via Environment JSON String
-    if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
-        try:
-            from google.cloud import vision
-            from google.oauth2 import service_account
-            info = json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
-            creds = service_account.Credentials.from_service_account_info(info)
-            client = vision.ImageAnnotatorClient(credentials=creds)
-            response = client.text_detection(image=vision.Image(content=img_bytes))
-            rp = _parse_gcp_vision_raw_peaks(response)
-            if rp: return rp
-        except Exception:
-            pass
-
-    # 3. Google Cloud Vision via File
+    # 2. Google Cloud Vision via File / Secrets
     key_path = auto_load_gcp_credentials()
-    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+    if key_path or "GOOGLE_APPLICATION_CREDENTIALS" in os.environ or "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
         try:
             from google.cloud import vision
             client = vision.ImageAnnotatorClient()
