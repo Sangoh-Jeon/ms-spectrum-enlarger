@@ -288,7 +288,7 @@ Return ONLY a JSON object:
   ]
 }
 """
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
     
     for model_name in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
@@ -297,8 +297,8 @@ Return ONLY a JSON object:
                 "parts": [
                     {"text": prompt},
                     {
-                        "inline_data": {
-                            "mime_type": "image/png",
+                        "inlineData": {
+                            "mimeType": "image/png",
                             "data": b64_img
                         }
                     }
@@ -310,7 +310,7 @@ Return ONLY a JSON object:
         }
         
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            resp = requests.post(url, json=payload, timeout=25)
             if resp.status_code == 200:
                 res_data = resp.json()
                 text = res_data["candidates"][0]["content"]["parts"][0]["text"]
