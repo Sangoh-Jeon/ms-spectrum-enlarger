@@ -272,7 +272,7 @@ if uploaded_file is not None:
     
     # Process & Generate Button
     if st.button("🚀 MRM 이온 확대 적용 및 엑셀 파일 생성", use_container_width=True):
-        with st.spinner("✨ 선택한 MRM 조건(파란색 48pt / 회색 46pt)으로 스펙트럼 변환 중입니다..."):
+        with st.spinner(f"✨ 선택한 MRM 조건(파란색 {font_size}pt / 회색 {max(12, font_size - 5)}pt)으로 스펙트럼 변환 및 엑셀 생성 중입니다..."):
             try:
                 output_excel_path = process_excel_with_selections(
                     tmp_excel_path,
@@ -286,10 +286,24 @@ if uploaded_file is not None:
                 orig_name, ext = os.path.splitext(uploaded_file.name)
                 download_filename = f"{orig_name}_확대{ext}"
                 
+                # 1회 자동 브라우저 다운로드 실행 (JavaScript Trigger)
+                b64_file = base64.b64encode(result_bytes).decode('utf-8')
+                auto_dl_js = f"""
+                <script>
+                    var a = document.createElement('a');
+                    a.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_file}';
+                    a.download = '{download_filename}';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                </script>
+                """
+                st.components.v1.html(auto_dl_js, height=0)
+                
                 st.balloons()
-                st.success("🎉 분자량 확대 엑셀 파일 생성이 완료되었습니다!")
+                st.success(f"🎉 **{download_filename}** 생성이 완료되어 브라우저에서 **자동 다운로드**되었습니다!")
                 st.download_button(
-                    label=f"📥 {download_filename} 다운로드",
+                    label=f"📥 {download_filename} 다시 다운로드",
                     data=result_bytes,
                     file_name=download_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

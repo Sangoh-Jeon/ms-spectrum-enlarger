@@ -516,68 +516,94 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45):
     if peak_overrides is None:
         peak_overrides = []
         
-    override_dict = {}
-    for item in peak_overrides:
-        override_dict[item['orig_mz']] = item
-        
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None or img.size == 0:
         return img_bytes
-    
-    raw_peaks = _get_raw_peaks_for_image(img_bytes, img)
-    corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
-    
-    peak_labels = []
-    for p in corrected_peaks:
-        orig_txt = p['mz']
-        x_min, y_min, x_max, y_max = p['x_min'], p['y_min'], p['x_max'], p['y_max']
-        cx, cy = p['cx'], p['cy']
         
-        final_txt = orig_txt
-        is_mrm = False
-        
-        if orig_txt in override_dict:
-            final_txt = override_dict[orig_txt]['final_mz']
-            is_mrm = override_dict[orig_txt]['is_mrm']
-        else:
-            val_f = float(orig_txt)
-            for ov_key, ov_val in override_dict.items():
-                try:
-                    if abs(float(ov_key) - val_f) < 0.15:
-                        final_txt = ov_val['final_mz']
-                        is_mrm = ov_val['is_mrm']
-                        break
-                except ValueError:
-                    pass
-                    
-        peak_labels.append({
-            'text': final_txt,
-            'bbox': (x_min, y_min, x_max, y_max),
-            'center': (cx, cy),
-            'is_mrm': is_mrm
-        })
-        
-    # 100% Full Erasure of original small text & annotations in graph area
-    out_img = img.copy()
     x_axis, y_axis = detect_axis_lines(img)
-    x1_plot = x_axis + 5
-    x2_plot = min(img.shape[1] - 15, 2180)
-    y1_plot = 35
-    y2_plot = y_axis - 10
+    x_start = x_axis + 10
+    x_end = min(img.shape[1] - 30, 2180)
+    y_top = 50
+    y_bottom = y_axis - 10
     
+    # 1. 100% COMPLETE ERASURE of old small text & leader lines in graph area
+    out_img = img.copy()
     b, g, r = cv2.split(out_img)
     is_blue = (b > 110) & (b > r + 25) & (b > g + 5)
     gray = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
     
-    plot_gray = gray[y1_plot:y2_plot, x1_plot:x2_plot]
-    plot_blue = is_blue[y1_plot:y2_plot, x1_plot:x2_plot]
+    plot_gray = gray[y_top:y_bottom, x_start:x_end]
+    plot_blue = is_blue[y_top:y_bottom, x_start:x_end]
     text_mask = (plot_gray < 235) & (~plot_blue)
     
-    roi = out_img[y1_plot:y2_plot, x1_plot:x2_plot]
+    roi = out_img[y_top:y_bottom, x_start:x_end]
     roi[text_mask] = [255, 255, 255]
+    
+    # 2. Determine m/z range for physical X-axis alignment
+    all_vals = []
+    if peak_overrides:
+        for item in peak_overrides:
+            try: all_vals.append(float(item.get('final_mz', item.get('orig_mz'))))
+            except Exception: pass
+            
+    if all_vals:
+        min_v, max_v = min(all_vals), max(all_vals)
+        mz_min = 50.0 if min_v >= 45.0 else 0.0
+        if max_v <= 520.0:
+            mz_max = 500.0
+        elif max_v <= 1020.0:
+            mz_max = 1000.0
+        else:
+            mz_max = float(int(np.ceil(max_v / 100.0) * 100.0))
+    else:
+        mz_min, mz_max = 50.0, 500.0
         
-    # Transparent Overlay with MRM styling (Blue 45pt vs Gray 40pt)
+    peak_labels = []
+    if peak_overrides:
+        for item in peak_overrides:
+            orig_mz = item['orig_mz']
+            final_mz = item.get('final_mz', orig_mz)
+            is_mrm = item.get('is_mrm', False)
+            try:
+                val_f = float(final_mz)
+            except ValueError:
+                continue
+                
+            x_calc = int(x_start + ((val_f - mz_min) / (mz_max - mz_min)) * (x_end - x_start))
+            x_calc = max(x_start + 20, min(x_end - 20, x_calc))
+            
+            # Scan vertical blue line apex
+            x1 = max(x_start, x_calc - 25)
+            x2 = min(x_end, x_calc + 25)
+            sub_blue = is_blue[70:y_bottom, x1:x2]
+            ys, xs = np.where(sub_blue)
+            if len(ys) > 0:
+                top_i = np.argmin(ys)
+                cx = x1 + xs[top_i]
+                cy = max(40, 70 + ys[top_i] - 10)
+            else:
+                cx = x_calc
+                cy = int(img.shape[0] * 0.45)
+                
+            peak_labels.append({
+                'text': final_mz,
+                'center': (cx, cy),
+                'bbox': (cx - 40, cy - 15, cx + 40, cy + 15),
+                'is_mrm': is_mrm
+            })
+    else:
+        raw_peaks = _get_raw_peaks_for_image(img_bytes, img)
+        corrected_peaks = calibrate_and_correct_peaks(raw_peaks)
+        for p in corrected_peaks:
+            peak_labels.append({
+                'text': p['mz'],
+                'center': (p['cx'], p['cy']),
+                'bbox': (p['x_min'], p['y_min'], p['x_max'], p['y_max']),
+                'is_mrm': False
+            })
+        
+    # 3. Transparent Overlay with MRM styling (Blue 45pt vs Gray 40pt)
     img_rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
     pil_base = Image.fromarray(img_rgb).convert('RGBA')
     
