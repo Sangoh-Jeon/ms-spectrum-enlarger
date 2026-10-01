@@ -75,6 +75,8 @@ def detect_axis_lines(img):
 def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, img_w=2225, padding_x=8, padding_y=8):
     """
     2D 계단식(Cascading) 텍스트 겹침 방지 및 상단 고피크 사이드 정렬 알고리즘.
+    - cy < 78 (실제 최상단 도달 피크): 피크 꼭지점의 수평 옆(우측/좌측)으로 배치
+    - 일반 피크: 피크 꼭대기(cy) 바로 위에 배치
     """
     labels.sort(key=lambda item: item['center'][0])
     placed = []
@@ -92,8 +94,8 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, img_w=
         item['apex_x'] = cx
         item['apex_y'] = cy
 
-        # ── 1. 상단 여백 부족 시 사이드(Side) 배치 ────────────────────────────
-        if cy < 90:
+        # ── 1. 최상단 여백 부족 시 사이드(Side) 배치 ────────────────────────────
+        if cy < 78:
             item['is_side_aligned'] = True
             if cx + tw + 20 < img_w - 35:
                 curr_x = cx + 12
@@ -102,14 +104,14 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, img_w=
                 curr_x = max(10, cx - tw - 12)
                 item['side_dir'] = 'left'
 
-            curr_y = max(10, cy - th // 2)
+            curr_y = max(55, cy - th // 2)
             init_x = curr_x
             init_y = curr_y
         else:
             item['is_side_aligned'] = False
             item['side_dir'] = None
             init_x = cx - tw // 2
-            init_y = max(10, cy - th - 6)
+            init_y = max(55, cy - th - 6)
             curr_x = init_x
             curr_y = init_y
 
@@ -144,8 +146,8 @@ def resolve_label_collisions_cascading(labels, font_main, font_sub, draw, img_w=
                 break
             attempt += 1
 
-        if curr_y < 10:
-            curr_y = 10
+        if curr_y < 55:
+            curr_y = 55
             if not item.get('is_side_aligned', False):
                 curr_x = cx + 12
                 item['is_side_aligned'] = True
@@ -230,23 +232,23 @@ Examine this LC-MS/MS spectrum plot image carefully.
 CRITICAL TASKS:
 1. X-Axis Mass Range (min_mz and max_mz):
    - Look at the top title header line (e.g. "+Q1 (166 - 172)" or "+Product Ion of 335.1 (20 - 345)").
-   - If not in title, look at the bottom horizontal X-axis tick numbers (e.g. 40, 50 ... 115, or 80, 90 ... 230).
+   - If not in title, look at the bottom horizontal X-axis tick numbers (e.g. 40, 50 ... 115, or 80, 90 ... 230, or 25, 30 ... 270).
    - Find the exact numerical m/z value at the leftmost Y-axis line ("min_mz") and rightmost plot edge ("max_mz").
 
 2. Peak m/z Labels:
    - Read all numerical peak labels printed near the blue spectral curve tops.
    - For each peak, record:
-     "mz": printed m/z value (e.g. "57.20", "103.10", "187.00", "231.00", "168.96", etc.)
+     "mz": printed m/z value (e.g. "57.20", "103.10", "187.00", "231.00", "168.96", "261.96", "244.06", etc.)
      "is_recommended": true for the primary target ion ({'tallest main precursor peak' if is_precursor else 'top 3 fragment ion peaks excluding precursor'}).
      "height_rank": 1 for the tallest peak, 2 for second, etc.
 
 Return ONLY a JSON object:
 {{
-  "min_mz": 38.0,
-  "max_mz": 117.0,
+  "min_mz": 20.0,
+  "max_mz": 270.0,
   "peaks": [
-    {{"mz": "57.20", "is_recommended": true, "height_rank": 1}},
-    {{"mz": "103.10", "is_recommended": true, "height_rank": 2}}
+    {{"mz": "244.06", "is_recommended": true, "height_rank": 1}},
+    {{"mz": "262.07", "is_recommended": true, "height_rank": 2}}
   ]
 }}
 """
@@ -384,7 +386,8 @@ def get_render_font(font_size, bold=True):
 
 def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_precursor=True, min_mz=None, max_mz=None):
     """
-    물리적 피크 클러스터링 기반 자동 스케일 보정 및 기하학적 1:1 매핑 알고리즘.
+    상단 툴바(노이즈)를 완벽 배제(y_top=58)하고,
+    물리적 피크 꼭대기 탐색 및 1:1 기하 비례 매핑을 수행합니다.
     """
     if peak_overrides is None:
         peak_overrides = []
@@ -398,10 +401,10 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     x_axis, y_axis = detect_axis_lines(img)
     x_start = x_axis
     x_end = w - 35
-    y_top = 35
+    y_top = 58  # 상단 툴바 및 메뉴 아이콘 영역 완전 배제 (천장 붙음 방지)
     y_bottom = y_axis - 5
 
-    # 1. 파란색 스펙트럼 곡선 마스크 정의
+    # 1. 파란색 스펙트럼 곡선 마스크 정의 (선명한 파란색 라인 보존)
     b, g, r = cv2.split(img)
     not_white = (r < 235) & (g < 235)
     is_blue = not_white & (b > r + 15) & (b > g + 8) & (b > 70)
@@ -419,12 +422,11 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     # 2. 이미지 내 주요 물리적 피크 꼭대기(Local Minima) 클러스터링
     peaks_x = []
     for x in range(x_start, x_end):
-        b_idx = np.where(is_blue[30:int(h * 0.75), x])[0]
+        b_idx = np.where(is_blue[y_top:int(h * 0.75), x])[0]
         if len(b_idx) > 0:
-            top_y = 30 + np.min(b_idx)
+            top_y = y_top + np.min(b_idx)
             peaks_x.append((x, top_y))
 
-    # 주요 피크 클러스터 추출 (높이 순 상위)
     detected_clusters = []
     for px, py in sorted(peaks_x, key=lambda item: item[1]):
         if not any(abs(px - c[0]) < 25 for c in detected_clusters):
@@ -447,10 +449,8 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
     max_v = max(all_vals, default=350.0)
     min_v = min(all_vals, default=20.0)
 
-    # 주요 피크 2개 매칭 (MRM 이온 2개 우선, 또는 가장 큰 피크 2개)
     fit_candidates = sorted(mrm_vals) if len(mrm_vals) >= 2 else sorted(all_vals)
     if len(detected_clusters) >= 2 and len(fit_candidates) >= 2:
-        # 상위 2개 클러스터를 X축 순으로 정렬
         top2_cl = sorted(detected_clusters[:2], key=lambda item: item[0])
         val1 = fit_candidates[0]
         val2 = fit_candidates[-1]
@@ -495,7 +495,7 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
 
     px_per_da = span_px / span_mz
 
-    # 4. 각 피크의 물리적 X 계산 및 로컬 정점(Apex) 탐색
+    # 4. 각 피크의 물리적 X 계산 및 로컬 정점(Apex) 탐색 (y_top=58 아래에서만 탐색)
     peak_labels = []
     for item in peak_overrides:
         orig_mz = item.get('orig_mz', '')
@@ -510,19 +510,18 @@ def process_spectrum_image(img_bytes, peak_overrides=None, font_size=45, is_prec
         x_calc = calc_x(val_f)
         x_calc = max(x_start + 5, min(x_end - 5, x_calc))
 
-        # 로컬 피크 정점 탐색
         scan = max(5, min(35, int(px_per_da * 0.45)))
         x1 = max(x_start, x_calc - scan)
         x2 = min(x_end, x_calc + scan + 1)
 
         best_apex_x = x_calc
-        best_apex_y = int(h * 0.45)  # 기본 위치
+        best_apex_y = int(h * 0.45)
 
         ys = []
         for scan_x in range(x1, x2):
-            blue_idx = np.where(is_blue[30:y_bottom, scan_x])[0]
+            blue_idx = np.where(is_blue[y_top:y_bottom, scan_x])[0]
             if len(blue_idx) > 0:
-                top_y = 30 + np.min(blue_idx)
+                top_y = y_top + np.min(blue_idx)
                 ys.append((scan_x, top_y))
 
         if ys:
